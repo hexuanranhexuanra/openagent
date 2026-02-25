@@ -7,8 +7,7 @@ import { handleWsOpen, handleWsMessage, handleWsClose } from "./websocket";
 import { bearerAuth } from "../middleware/auth";
 import { createLogger } from "../logger";
 import { getConfig } from "../config";
-import { getWebChatHtml } from "./webchat-ui";
-import { getConfigUiHtml } from "./config-ui";
+import { getAppHtml } from "./app-ui";
 
 const log = createLogger("gateway");
 
@@ -54,15 +53,10 @@ export function createGateway() {
     })),
   );
 
-  // ─── WebChat UI ───
-  app.get("/", (c) => {
-    return c.html(getWebChatHtml());
-  });
-
-  // ─── Config UI ───
-  app.get("/config", (c) => {
-    return c.html(getConfigUiHtml());
-  });
+  // ─── Unified SPA ───
+  const appHtml = getAppHtml();
+  app.get("/", (c) => c.html(appHtml));
+  app.get("/config", (c) => c.redirect("/#settings"));
 
   return { app, websocket };
 }
@@ -71,9 +65,25 @@ export function startGateway() {
   const config = getConfig();
   const { app, websocket } = createGateway();
 
+  // Wrap websocket handlers with guards: Bun's WS handler is global,
+  // so connections not upgraded via Hono's /ws route lack ws.data.events
+  const safeWebsocket = {
+    ...websocket,
+    open(ws: ServerWebSocket) {
+      if ((ws.data as Record<string, unknown>)?.events) websocket.open?.(ws);
+    },
+    message(ws: ServerWebSocket, message: string | Buffer) {
+      if ((ws.data as Record<string, unknown>)?.events) websocket.message(ws, message);
+      else ws.close(1008, "Invalid connection");
+    },
+    close(ws: ServerWebSocket, code: number, reason: string) {
+      if ((ws.data as Record<string, unknown>)?.events) websocket.close?.(ws, code, reason);
+    },
+  };
+
   const server = Bun.serve({
     fetch: app.fetch,
-    websocket,
+    websocket: safeWebsocket,
     port: config.gateway.port,
     hostname: config.gateway.host,
   });

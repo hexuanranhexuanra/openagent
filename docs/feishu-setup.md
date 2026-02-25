@@ -85,20 +85,31 @@ FEISHU_REPLY_MODE=async
 
 ### Option C: Config UI
 
-Navigate to `http://localhost:18789/config` and fill in the Feishu fields under the **Channels** tab.
+Navigate to `http://localhost:19090/#settings` and fill in the Feishu fields under the **Channels** section.
+
+## Reusing an Existing Feishu Bot (e.g. from OpenClaw)
+
+A Feishu bot can only have **one** Event Subscription webhook URL at a time. If your bot already points to another service (like OpenClaw), you have two options:
+
+| Option | Pros | Cons |
+|--------|------|------|
+| **Create a new bot** for OpenAgent | Both systems work independently | Need to manage two bots |
+| **Switch webhook URL** between systems | Only one bot to manage | Only one system receives messages at a time |
+
+For development/testing, **creating a second bot** is recommended. Just repeat Step 1 with a different app name (e.g. "OpenAgent Dev").
 
 ## Step 5: Expose Your Gateway
 
-Feishu needs a public HTTPS URL to send webhook events. Options:
+Feishu needs a public HTTPS URL to send webhook events. Your local gateway at `http://127.0.0.1:19090` is not reachable from Feishu's cloud. Options:
 
 ### For Development (ngrok / cloudflared)
 
 ```bash
 # Using ngrok
-ngrok http 18789
+ngrok http 19090
 
-# Using cloudflared (recommended)
-cloudflared tunnel --url http://localhost:18789
+# Using cloudflared (no account needed)
+cloudflared tunnel --url http://localhost:19090
 ```
 
 Copy the public URL and set it as the webhook URL in Feishu:
@@ -120,7 +131,7 @@ server {
     ssl_certificate_key /etc/ssl/key.pem;
 
     location / {
-        proxy_pass http://127.0.0.1:18789;
+        proxy_pass http://127.0.0.1:19090;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-Proto $scheme;
@@ -198,7 +209,7 @@ You can also proactively send messages to Feishu users:
 
 ```bash
 # Send via chat API
-curl -X POST http://localhost:18789/api/chat \
+curl -X POST http://localhost:19090/api/chat \
   -H "Content-Type: application/json" \
   -d '{"message": "Hello from API", "peerId": "feishu-user-open-id"}'
 ```

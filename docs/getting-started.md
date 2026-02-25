@@ -10,9 +10,10 @@ Step-by-step guide to initialize and run your own self-evolving AI agent.
 |------|---------|---------|
 | Bun | 1.1+ | `curl -fsSL https://bun.sh/install \| bash` |
 | PM2 | 5+ | `npm install -g pm2` (optional, for daemon mode) |
-| ngrok or cloudflared | latest | For exposing webhooks to Feishu/Telegram |
+| ngrok or cloudflared | latest | For exposing webhooks to Feishu/Telegram (optional) |
 
-You also need at least one LLM API key:
+You also need at least one LLM provider:
+- **ByteDance GenAI** (internal): Requires an `ak` key and the model name
 - **OpenAI**: Get a key at [platform.openai.com](https://platform.openai.com)
 - **Anthropic**: Get a key at [console.anthropic.com](https://console.anthropic.com)
 
@@ -40,14 +41,30 @@ cp .env.example .env
 Edit `.env` with your values:
 
 ```env
-# Pick one provider (at minimum)
-OPENAI_API_KEY=sk-your-key-here
+# Gateway (default port: 19090)
+GATEWAY_PORT=19090
+
+# ── ByteDance GenAI (internal) ──
+OPENAI_API_KEY=unused
+OPENAI_BASE_URL=https://gpt-i18n.byteintl.net/gpt/openapi/online
+OPENAI_MODEL=gpt-5.2-codex-2026-01-14
+OPENAI_QUERY_AK=your_ak_key_here
 DEFAULT_PROVIDER=openai
 
-# Or use Anthropic
+# ── Or use standard OpenAI ──
+# OPENAI_API_KEY=sk-your-key-here
+# OPENAI_MODEL=gpt-4o
+# DEFAULT_PROVIDER=openai
+
+# ── Or use Anthropic ──
 # ANTHROPIC_API_KEY=sk-ant-your-key-here
 # DEFAULT_PROVIDER=anthropic
 ```
+
+**ByteDance GenAI notes:**
+- Set `OPENAI_API_KEY=unused` — authentication is via the `ak` query parameter
+- The provider is auto-detected when `OPENAI_QUERY_AK` is set and the base URL contains `byteintl.net` or `tiktok-row.org`
+- Office network: change base URL to `https://genai-sg-og.tiktok-row.org/gpt/openapi/online`
 
 ### Option B: JSON Config File
 
@@ -56,11 +73,14 @@ Create `openagent.json` in the project root:
 ```json
 {
   "agent": {
-    "defaultProvider": "anthropic"
+    "defaultProvider": "openai"
   },
   "providers": {
-    "anthropic": {
-      "apiKey": "sk-ant-your-key"
+    "openai": {
+      "apiKey": "unused",
+      "baseUrl": "https://gpt-i18n.byteintl.net/gpt/openapi/online",
+      "model": "gpt-5.2-codex-2026-01-14",
+      "queryParams": { "ak": "your_ak_key_here" }
     }
   }
 }
@@ -68,39 +88,12 @@ Create `openagent.json` in the project root:
 
 ### Option C: Web Config UI
 
-Start the gateway first (Step 3), then open `http://localhost:18789/config` in your browser. The UI auto-generates forms from the JSON Schema — every config field is editable visually.
+Start the gateway first (Step 3), then open `http://localhost:19090/#settings` in your browser. The UI auto-generates forms from the JSON Schema.
 
-## Step 3: Verify Setup
-
-```bash
-bun run doctor
-```
-
-Expected output:
-
-```
-  🩺 OpenAgent Doctor
-
-  Bun:       1.x.x
-  Config:    loaded
-  Provider:  openai
-  API Key:   set (sk-xxxx...)
-  SOUL.md    ✓
-  USER.md    ✓
-  WORLD.md   ✓
-  PM2:       5.x.x
-```
-
-If "API Key" shows "NOT SET", go back to Step 2.
-
-## Step 4: Start the Gateway
+## Step 3: Start the Gateway
 
 ```bash
-# Development mode (auto-reload on code changes)
-bun run dev
-
-# Or production mode
-bun run start
+bun run src/index.ts gateway
 ```
 
 Output:
@@ -108,28 +101,28 @@ Output:
 ```
   🤖 OpenAgent Gateway
   ─────────────────────────────────
-  HTTP    http://127.0.0.1:18789
-  WS      ws://127.0.0.1:18789/ws
-  WebChat http://127.0.0.1:18789/
+  HTTP    http://127.0.0.1:19090
+  WS      ws://127.0.0.1:19090/ws
+  WebChat http://127.0.0.1:19090/
   ─────────────────────────────────
-  Provider: openai
+  Provider: bytedance-genai
   PID:      12345
 ```
 
 Your agent is now running. Open:
-- `http://localhost:18789/` — **WebChat** (talk to your agent)
-- `http://localhost:18789/config` — **Settings UI** (configure everything visually)
+- `http://localhost:19090/` — **WebChat** (talk to your agent in browser)
+- `http://localhost:19090/#settings` — **Settings UI** (configure everything visually)
 
-## Step 5: Talk to Your Agent
+## Step 4: Talk to Your Agent
 
 ### Via WebChat (browser)
 
-Open `http://localhost:18789/` and start chatting.
+Open `http://localhost:19090/` and start chatting.
 
 ### Via CLI (interactive REPL)
 
 ```bash
-bun run chat
+bun run src/index.ts chat
 ```
 
 Slash commands inside the REPL:
@@ -141,40 +134,34 @@ Slash commands inside the REPL:
 | `/reset` | Clear session history |
 | `/exit` | Quit |
 
-### Via CLI (one-shot)
-
-```bash
-bun run agent -- -m "What is the weather today?"
-```
-
 ### Via HTTP API
 
 ```bash
 # Synchronous (waits for full response)
-curl -X POST http://localhost:18789/api/chat \
+curl -X POST http://localhost:19090/api/chat \
   -H "Content-Type: application/json" \
   -d '{"message": "Hello!"}'
 
 # Asynchronous (queued, returns taskId)
-curl -X POST http://localhost:18789/api/chat/async \
+curl -X POST http://localhost:19090/api/chat/async \
   -H "Content-Type: application/json" \
   -d '{"message": "Summarize today news", "channel": "api"}'
 ```
 
 ---
 
-## Step 6: Connect a Channel (Optional)
-
-### Feishu Bot
+## Step 5: Connect Feishu Bot (Optional)
 
 See [docs/feishu-setup.md](./feishu-setup.md) for full setup.
 
 Quick version:
 
-1. Create a bot at [open.feishu.cn/app](https://open.feishu.cn/app)
-2. Set env vars: `LARK_APP_ID`, `LARK_APP_SECRET`, `LARK_ENCRYPT_KEY`, `LARK_VERIFICATION_TOKEN`
-3. Expose gateway: `ngrok http 18789`
-4. Set webhook URL: `https://xxxx.ngrok-free.app/api/webhook/feishu/webhook`
+1. Create a bot at [open.feishu.cn/app](https://open.feishu.cn/app) (or reuse existing)
+2. Set env vars: `LARK_APP_ID`, `LARK_APP_SECRET`
+3. Expose gateway: `ngrok http 19090` or `cloudflared tunnel --url http://localhost:19090`
+4. Set webhook URL in Feishu: `https://<tunnel-domain>/api/webhook/feishu/webhook`
+
+**If you already have a Feishu bot in OpenClaw:** A single bot can only have ONE webhook URL. Either create a second bot for OpenAgent, or switch the webhook URL between the two systems.
 
 ### Telegram Bot (planned)
 
@@ -182,7 +169,7 @@ Set `TELEGRAM_BOT_TOKEN` in `.env` and enable in config.
 
 ---
 
-## Step 7: Daemon Mode (Production)
+## Step 6: Daemon Mode (Production)
 
 Use PM2 to run gateway + worker as background processes:
 
