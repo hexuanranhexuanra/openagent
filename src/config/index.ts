@@ -38,6 +38,14 @@ function mergeEnvOverrides(base: Record<string, unknown>): Record<string, unknow
   if (!merged.agent) merged.agent = {};
   if (env.DEFAULT_PROVIDER) (merged.agent as Record<string, unknown>).defaultProvider = env.DEFAULT_PROVIDER;
 
+  if (!merged.channels) merged.channels = {} as Record<string, Record<string, unknown>>;
+  if (!merged.channels.feishu) merged.channels.feishu = {};
+  if (env.LARK_APP_ID) merged.channels.feishu.appId = env.LARK_APP_ID;
+  if (env.LARK_APP_SECRET) merged.channels.feishu.appSecret = env.LARK_APP_SECRET;
+  if (env.LARK_ENCRYPT_KEY) merged.channels.feishu.encryptKey = env.LARK_ENCRYPT_KEY;
+  if (env.LARK_VERIFICATION_TOKEN) merged.channels.feishu.verificationToken = env.LARK_VERIFICATION_TOKEN;
+  if (env.LARK_APP_ID && env.LARK_APP_SECRET) merged.channels.feishu.enabled = true;
+
   if (!merged.logging) merged.logging = {};
   if (env.LOG_LEVEL) (merged.logging as Record<string, unknown>).level = env.LOG_LEVEL;
 

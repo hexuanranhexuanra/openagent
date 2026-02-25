@@ -11,12 +11,23 @@ import {
 import { dateTimeTool } from "./tools/builtin/datetime";
 import { webSearchTool } from "./tools/builtin/web-search";
 import { shellTool } from "./tools/builtin/shell";
-import { memoryTool } from "./tools/builtin/memory";
+import { readFileTool, writeFileTool, listFilesTool } from "./tools/builtin/file-ops";
+import {
+  memoryUpdateTool,
+  memoryAppendTool,
+  memoryReadTool,
+  skillCreateTool,
+  skillListTool,
+  selfModifyTool,
+} from "./tools/builtin/evolution-tools";
 import {
   getOrCreateSession,
   appendMessage,
   getSessionMessages,
 } from "../sessions/manager";
+import { getMemoryStore } from "../evolution/memory";
+import { getSkillLoader } from "../evolution/skill-loader";
+import { reflectOnConversation } from "../evolution/reflection";
 import type { ChatMessage, StreamChunk, ToolCall } from "../types";
 
 const log = createLogger("agent");
@@ -31,7 +42,22 @@ export function initAgent(): void {
   registerTool(dateTimeTool);
   registerTool(webSearchTool);
   registerTool(shellTool);
-  registerTool(memoryTool);
+
+  // File operation tools
+  registerTool(readFileTool);
+  registerTool(writeFileTool);
+  registerTool(listFilesTool);
+
+  // Evolution tools
+  registerTool(memoryUpdateTool);
+  registerTool(memoryAppendTool);
+  registerTool(memoryReadTool);
+  registerTool(skillCreateTool);
+  registerTool(skillListTool);
+  registerTool(selfModifyTool);
+
+  // Load dynamic skills
+  loadSkills();
 
   // Init LLM provider
   const providerName = config.agent.defaultProvider;
@@ -61,6 +87,59 @@ export function initAgent(): void {
   log.info("Agent initialized", { provider: provider.name });
 }
 
+async function loadSkills(): Promise<void> {
+  try {
+    const loader = getSkillLoader();
+    const skills = await loader.loadAll();
+    for (const skill of skills) {
+      registerTool(skill);
+    }
+  } catch (err) {
+    log.warn("Skill loading failed (non-fatal)", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+/**
+ * Build a system prompt that includes the agent's memory (SOUL + USER + WORLD).
+ */
+async function buildSystemPrompt(basePrompt: string): Promise<string> {
+  try {
+    const memory = getMemoryStore();
+    const { soul, user, world } = await memory.readAll();
+
+    const parts: string[] = [basePrompt];
+
+    if (soul) {
+      parts.push("\n\n--- SOUL (your identity and behavioral guidelines) ---\n" + soul);
+    }
+    if (user) {
+      parts.push("\n\n--- USER (what you know about the user) ---\n" + user);
+    }
+    if (world) {
+      parts.push("\n\n--- WORLD (accumulated knowledge) ---\n" + world);
+    }
+
+    parts.push(
+      "\n\n--- EVOLUTION INSTRUCTIONS ---\n" +
+      "You have access to evolution tools. Use them proactively:\n" +
+      "- memory_update/memory_append: Record learned behaviors, preferences, important facts\n" +
+      "- skill_create: Create reusable skill scripts for recurring tasks\n" +
+      "- self_modify: Modify your own source code (within safety boundaries)\n" +
+      "- read_file/write_file: Work with files in user-space/workspace/\n" +
+      "Evolve yourself to serve the user better over time.",
+    );
+
+    return parts.join("");
+  } catch (err) {
+    log.warn("Failed to build memory-enhanced prompt, using base", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return basePrompt;
+  }
+}
+
 export interface AgentStreamEvent {
   type: "text" | "tool_start" | "tool_result" | "done" | "error";
   content?: string;
@@ -84,6 +163,9 @@ export async function* runAgent(
   const session = getOrCreateSession(channel, peerId);
   const tools = getAllToolDefinitions();
 
+  // Build memory-enhanced system prompt
+  const systemPrompt = await buildSystemPrompt(config.agent.systemPrompt);
+
   // Append user message
   const userMsg: ChatMessage = {
     role: "user",
@@ -100,7 +182,7 @@ export async function* runAgent(
     round++;
     const history = getSessionMessages(session.id);
 
-    const stream = provider.chat(history, tools, config.agent.systemPrompt);
+    const stream = provider.chat(history, tools, systemPrompt);
     let roundText = "";
     pendingToolCalls = [];
 
@@ -174,13 +256,15 @@ export async function* runAgent(
       };
       appendMessage(session.id, toolMsg);
     }
-
-    // Loop continues to next round with tool results in context
   }
 
   if (round >= MAX_TOOL_ROUNDS) {
     log.warn("Max tool rounds reached", { channel, peerId, rounds: round });
   }
+
+  // Async reflection — don't block the response
+  const finalMessages = getSessionMessages(session.id);
+  reflectOnConversation(finalMessages, channel, peerId).catch(() => {});
 
   yield { type: "done" };
 }

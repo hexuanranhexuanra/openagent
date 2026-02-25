@@ -8,6 +8,7 @@ import { bearerAuth } from "../middleware/auth";
 import { createLogger } from "../logger";
 import { getConfig } from "../config";
 import { getWebChatHtml } from "./webchat-ui";
+import { getConfigUiHtml } from "./config-ui";
 
 const log = createLogger("gateway");
 
@@ -56,6 +57,11 @@ export function createGateway() {
   // ─── WebChat UI ───
   app.get("/", (c) => {
     return c.html(getWebChatHtml());
+  });
+
+  // ─── Config UI ───
+  app.get("/config", (c) => {
+    return c.html(getConfigUiHtml());
   });
 
   return { app, websocket };

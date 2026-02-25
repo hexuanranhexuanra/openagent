@@ -4,6 +4,8 @@ import { createLogger } from "../logger";
 import { verifyLarkSignature } from "../middleware/auth";
 import { idempotencyStore } from "../middleware/idempotency";
 import { enqueueMessage } from "../queue";
+import { runAgent } from "../agent";
+import { feishuReply } from "./feishu-api";
 import { auditLog } from "../audit";
 
 const log = createLogger("channel:feishu");
@@ -11,6 +13,10 @@ const log = createLogger("channel:feishu");
 interface FeishuConfig {
   encryptKey?: string;
   verificationToken?: string;
+  appId?: string;
+  appSecret?: string;
+  /** "sync" = reply inline; "async" = enqueue to worker (default) */
+  replyMode?: "sync" | "async";
 }
 
 /**
@@ -21,6 +27,7 @@ interface FeishuConfig {
  * - Message events (im.message.receive_v1)
  * - Event signature verification
  * - Idempotent event dedup
+ * - Reply back to user (sync or async mode)
  */
 export function createFeishuRoutes(config: FeishuConfig): Hono {
   const feishu = new Hono();
@@ -52,7 +59,6 @@ export function createFeishuRoutes(config: FeishuConfig): Hono {
       const eventId = header.event_id as string;
       const eventType = header.event_type as string;
 
-      // Idempotency check
       if (idempotencyStore.isDuplicate(`feishu:${eventId}`)) {
         return c.json({ message: "Event already processed" }, 200);
       }
@@ -70,9 +76,11 @@ export function createFeishuRoutes(config: FeishuConfig): Hono {
         }
 
         const messageType = message.message_type as string;
-        const senderId = (sender.sender_id as Record<string, unknown>)?.open_id as string ?? "unknown";
+        const messageId = message.message_id as string;
+        const chatId = message.chat_id as string | undefined;
+        const senderId =
+          (sender.sender_id as Record<string, unknown>)?.open_id as string ?? "unknown";
 
-        // Only process text messages for now
         if (messageType !== "text") {
           log.debug("Skipping non-text message", { messageType });
           return c.json({ message: "Ignored non-text message" }, 200);
@@ -86,6 +94,12 @@ export function createFeishuRoutes(config: FeishuConfig): Hono {
           textContent = (message.content as string) ?? "";
         }
 
+        // Strip @bot mention prefix (Feishu wraps it as @_user_x)
+        textContent = textContent.replace(/@_user_\d+\s*/g, "").trim();
+        if (!textContent) {
+          return c.json({ message: "Empty after mention strip" }, 200);
+        }
+
         const taskId = `feishu-${eventId}-${nanoid(6)}`;
 
         auditLog({
@@ -93,15 +107,40 @@ export function createFeishuRoutes(config: FeishuConfig): Hono {
           action: "message_received",
           who: senderId,
           channel: "feishu",
-          detail: { eventId, messageType, textLength: textContent.length },
+          detail: { eventId, messageId, messageType, textLength: textContent.length },
         });
 
-        // Enqueue for async processing
+        // ─── Sync reply: run agent inline and reply immediately ───
+        if (config.replyMode === "sync" && config.appId && config.appSecret) {
+          try {
+            let fullResponse = "";
+            const stream = runAgent("feishu", senderId, textContent);
+            for await (const evt of stream) {
+              if (evt.type === "text") fullResponse += evt.content ?? "";
+            }
+
+            if (fullResponse) {
+              await feishuReply(config.appId, config.appSecret, {
+                messageId,
+                receiveId: senderId,
+                text: fullResponse,
+              });
+            }
+          } catch (err) {
+            log.error("Sync reply failed", { taskId, error: String(err) });
+          }
+
+          return c.json({ message: "Processed (sync)", taskId }, 200);
+        }
+
+        // ─── Async: enqueue for Worker processing ───
         await enqueueMessage({
           taskId,
           channel: "feishu",
           peerId: senderId,
           content: textContent,
+          feishuMessageId: messageId,
+          chatId,
           priority: "high",
           createdAt: Date.now(),
         });

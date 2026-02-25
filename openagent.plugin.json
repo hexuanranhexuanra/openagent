@@ -1,0 +1,65 @@
+{
+  "$schema": "https://openagent.dev/schemas/plugin.json",
+  "id": "core",
+  "name": "OpenAgent Core",
+  "version": "0.2.0",
+  "description": "Built-in channels and tools",
+  "channels": [
+    {
+      "id": "webchat",
+      "label": "WebChat",
+      "description": "Browser-based chat UI served by the gateway",
+      "builtIn": true,
+      "configSchema": {
+        "type": "object",
+        "properties": {
+          "enabled": { "type": "boolean", "default": true }
+        }
+      }
+    },
+    {
+      "id": "feishu",
+      "label": "Feishu / Lark",
+      "description": "Feishu enterprise messaging bot",
+      "docsPath": "/docs/feishu-setup.md",
+      "configSchema": {
+        "type": "object",
+        "properties": {
+          "enabled": { "type": "boolean", "default": false },
+          "appId": { "type": "string" },
+          "appSecret": { "type": "string" },
+          "encryptKey": { "type": "string" },
+          "verificationToken": { "type": "string" }
+        }
+      },
+      "uiHints": {
+        "appId": { "label": "App ID", "placeholder": "cli_xxxxxxxx" },
+        "appSecret": { "label": "App Secret", "sensitive": true },
+        "encryptKey": { "label": "Encrypt Key", "sensitive": true, "help": "For webhook signature verification" },
+        "verificationToken": { "label": "Verification Token", "sensitive": true }
+      }
+    },
+    {
+      "id": "telegram",
+      "label": "Telegram",
+      "description": "Telegram Bot API integration",
+      "configSchema": {
+        "type": "object",
+        "properties": {
+          "enabled": { "type": "boolean", "default": false },
+          "botToken": { "type": "string" }
+        }
+      },
+      "uiHints": {
+        "botToken": { "label": "Bot Token", "sensitive": true, "placeholder": "123456:ABC-..." }
+      }
+    }
+  ],
+  "tools": [
+    { "id": "file-ops", "label": "File Operations", "builtIn": true },
+    { "id": "shell", "label": "Shell Commands", "builtIn": true },
+    { "id": "web-search", "label": "Web Search", "builtIn": true },
+    { "id": "datetime", "label": "Date & Time", "builtIn": true },
+    { "id": "evolution-tools", "label": "Self-Evolution", "builtIn": true }
+  ]
+}

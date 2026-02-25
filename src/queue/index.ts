@@ -15,6 +15,10 @@ export interface MessageJobData {
   peerId: string;
   content: string;
   wsClientId?: string;
+  /** Feishu original message_id for threaded reply */
+  feishuMessageId?: string;
+  /** Feishu chat_id for group chat scenarios */
+  chatId?: string;
   priority?: "high" | "default" | "low";
   createdAt: number;
 }

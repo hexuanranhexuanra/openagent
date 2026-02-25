@@ -10,9 +10,13 @@ export const configSchema = z.object({
   agent: z.object({
     defaultProvider: z.enum(["openai", "anthropic"]).default("openai"),
     systemPrompt: z.string().default(
-      "You are OpenAgent, a helpful personal AI assistant. Be concise, accurate, and friendly."
+      "You are OpenAgent, a self-evolving personal AI assistant. " +
+      "You can use tools to help the user, remember things across sessions, " +
+      "create new skills, and even modify your own code. " +
+      "Be concise, accurate, and proactive about learning from interactions."
     ),
     maxHistoryMessages: z.number().default(50),
+    maxToolRounds: z.number().default(10),
   }).default({}),
 
   providers: z.object({
@@ -42,6 +46,13 @@ export const configSchema = z.object({
       enabled: z.boolean().default(false),
       botToken: z.string().default(""),
     }).default({}),
+  }).default({}),
+
+  evolution: z.object({
+    memoryPath: z.string().default("./user-space/memory"),
+    skillsPath: z.string().default("./user-space/skills"),
+    selfModifyEnabled: z.boolean().default(true),
+    reflectionEnabled: z.boolean().default(true),
   }).default({}),
 
   logging: z.object({

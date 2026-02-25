@@ -9,10 +9,36 @@ import { loadConfig } from "./config";
 import { setLogLevel, createLogger } from "./logger";
 import { initAgent } from "./agent";
 import { initQueue, initWorker, onJobStream, shutdownQueue } from "./queue";
-import type { JobStreamEvent } from "./queue";
+import type { JobStreamEvent, MessageJobData } from "./queue";
+import { feishuReply } from "./channels/feishu-api";
 import { auditLog } from "./audit";
 
 const log = createLogger("worker");
+
+// Accumulate text chunks per task, flush on "done"
+const textBuffers = new Map<string, { chunks: string[]; jobData: MessageJobData }>();
+
+async function deliverToChannel(taskId: string, jobData: MessageJobData, text: string) {
+  const config = loadConfig();
+
+  if (jobData.channel === "feishu") {
+    const feishuCfg = config.channels.feishu;
+    if (!feishuCfg.appId || !feishuCfg.appSecret) {
+      log.warn("Feishu appId/appSecret not configured, cannot reply", { taskId });
+      return;
+    }
+    const ok = await feishuReply(feishuCfg.appId, feishuCfg.appSecret, {
+      messageId: jobData.feishuMessageId,
+      receiveId: jobData.peerId,
+      text,
+    });
+    if (!ok) log.error("Feishu reply delivery failed", { taskId });
+    return;
+  }
+
+  // Other channels (telegram, webchat, etc.) would be handled here
+  log.debug("No delivery handler for channel", { channel: jobData.channel, taskId });
+}
 
 async function main() {
   const config = loadConfig();
@@ -23,15 +49,19 @@ async function main() {
   initAgent();
   await initQueue();
 
-  // Stream callback: forward results to the appropriate channel
   onJobStream((streamEvent: JobStreamEvent) => {
     const { taskId, jobData, event } = streamEvent;
 
     switch (event.type) {
-      case "text":
-        // In a full implementation, this would push text chunks
-        // back to the originating channel (Feishu, Telegram, WebSocket, etc.)
+      case "text": {
+        let buf = textBuffers.get(taskId);
+        if (!buf) {
+          buf = { chunks: [], jobData };
+          textBuffers.set(taskId, buf);
+        }
+        if (event.content) buf.chunks.push(event.content);
         break;
+      }
 
       case "tool_start":
         auditLog({
@@ -53,7 +83,7 @@ async function main() {
         });
         break;
 
-      case "done":
+      case "done": {
         auditLog({
           taskId,
           action: "task_complete",
@@ -61,7 +91,17 @@ async function main() {
           channel: jobData.channel,
           detail: { usage: event.usage },
         });
+
+        const buf = textBuffers.get(taskId);
+        if (buf && buf.chunks.length > 0) {
+          const fullText = buf.chunks.join("");
+          deliverToChannel(taskId, buf.jobData, fullText).catch((err) =>
+            log.error("Delivery error", { taskId, error: String(err) }),
+          );
+        }
+        textBuffers.delete(taskId);
         break;
+      }
 
       case "error":
         auditLog({
@@ -71,6 +111,7 @@ async function main() {
           channel: jobData.channel,
           detail: { error: event.error },
         });
+        textBuffers.delete(taskId);
         break;
     }
   });
