@@ -2,7 +2,7 @@ import { z } from "zod";
 
 export const configSchema = z.object({
   gateway: z.object({
-    port: z.number().default(18789),
+    port: z.number().default(19090),
     host: z.string().default("127.0.0.1"),
     authToken: z.string().optional(),
   }).default({}),
@@ -24,6 +24,8 @@ export const configSchema = z.object({
       apiKey: z.string().default(""),
       baseUrl: z.string().default("https://api.openai.com/v1"),
       model: z.string().default("gpt-4o"),
+      /** Extra query params appended to every request (e.g. { ak: "..." } for ByteDance GenAI) */
+      queryParams: z.record(z.string()).default({}),
     }).default({}),
     anthropic: z.object({
       apiKey: z.string().default(""),

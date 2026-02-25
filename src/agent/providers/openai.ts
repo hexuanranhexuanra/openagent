@@ -10,13 +10,18 @@ export class OpenAIProvider implements LLMProvider {
   private client: OpenAI;
   private model: string;
 
-  constructor(apiKey: string, model: string, baseUrl?: string) {
-    this.client = new OpenAI({
-      apiKey,
+  constructor(apiKey: string, model: string, baseUrl?: string, queryParams?: Record<string, string>) {
+    const opts: ConstructorParameters<typeof OpenAI>[0] = {
+      apiKey: apiKey || "unused",
       baseURL: baseUrl,
-    });
+    };
+    // Support query-param auth (e.g. ByteDance GenAI uses ?ak=...)
+    if (queryParams && Object.keys(queryParams).length > 0) {
+      opts.defaultQuery = queryParams;
+    }
+    this.client = new OpenAI(opts);
     this.model = model;
-    log.info("OpenAI provider initialized", { model });
+    log.info("OpenAI provider initialized", { model, baseUrl: baseUrl ?? "default" });
   }
 
   async *chat(

@@ -30,6 +30,11 @@ function mergeEnvOverrides(base: Record<string, unknown>): Record<string, unknow
   if (env.OPENAI_API_KEY) merged.providers.openai.apiKey = env.OPENAI_API_KEY;
   if (env.OPENAI_BASE_URL) merged.providers.openai.baseUrl = env.OPENAI_BASE_URL;
   if (env.OPENAI_MODEL) merged.providers.openai.model = env.OPENAI_MODEL;
+  // Support ak= style query param auth (ByteDance GenAI, etc.)
+  if (env.OPENAI_QUERY_AK) {
+    if (!merged.providers.openai.queryParams) merged.providers.openai.queryParams = {};
+    (merged.providers.openai.queryParams as Record<string, string>).ak = env.OPENAI_QUERY_AK;
+  }
 
   if (!merged.providers.anthropic) merged.providers.anthropic = {};
   if (env.ANTHROPIC_API_KEY) merged.providers.anthropic.apiKey = env.ANTHROPIC_API_KEY;

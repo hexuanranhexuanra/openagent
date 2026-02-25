@@ -3,6 +3,7 @@ import { getConfig } from "../config";
 import type { LLMProvider } from "./providers/base";
 import { OpenAIProvider } from "./providers/openai";
 import { AnthropicProvider } from "./providers/anthropic";
+import { ByteDanceGenAIProvider } from "./providers/bytedance-genai";
 import {
   registerTool,
   getAllToolDefinitions,
@@ -61,30 +62,36 @@ export function initAgent(): void {
 
   // Init LLM provider
   const providerName = config.agent.defaultProvider;
+  const oai = config.providers.openai;
+
+  // Auto-detect ByteDance GenAI when ak query param is configured
+  const isByteDance = oai.queryParams?.ak && oai.baseUrl?.includes("byteintl.net") || oai.baseUrl?.includes("tiktok-row.org");
 
   if (providerName === "anthropic") {
     if (!config.providers.anthropic.apiKey) {
       log.warn("Anthropic API key not set, falling back to OpenAI");
-      provider = new OpenAIProvider(
-        config.providers.openai.apiKey,
-        config.providers.openai.model,
-        config.providers.openai.baseUrl,
-      );
+      if (isByteDance) {
+        provider = new ByteDanceGenAIProvider(oai.model, oai.baseUrl, oai.queryParams.ak);
+      } else {
+        provider = new OpenAIProvider(oai.apiKey, oai.model, oai.baseUrl, oai.queryParams);
+      }
     } else {
       provider = new AnthropicProvider(
         config.providers.anthropic.apiKey,
         config.providers.anthropic.model,
       );
     }
+  } else if (isByteDance) {
+    provider = new ByteDanceGenAIProvider(oai.model, oai.baseUrl, oai.queryParams.ak);
   } else {
-    provider = new OpenAIProvider(
-      config.providers.openai.apiKey,
-      config.providers.openai.model,
-      config.providers.openai.baseUrl,
-    );
+    provider = new OpenAIProvider(oai.apiKey, oai.model, oai.baseUrl, oai.queryParams);
   }
 
   log.info("Agent initialized", { provider: provider.name });
+}
+
+export function getProviderName(): string {
+  return provider?.name ?? "unknown";
 }
 
 async function loadSkills(): Promise<void> {

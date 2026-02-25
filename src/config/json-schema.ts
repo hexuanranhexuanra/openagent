@@ -50,6 +50,7 @@ const UI_HINTS: UiHints = {
   "providers.openai.apiKey": { label: "API Key", sensitive: true, placeholder: "sk-..." },
   "providers.openai.baseUrl": { label: "Base URL", help: "Custom endpoint (for proxies or Azure)", placeholder: "https://api.openai.com/v1" },
   "providers.openai.model": { label: "Model", placeholder: "gpt-4o" },
+  "providers.openai.queryParams": { label: "Query Params", help: "Extra URL params (e.g. { \"ak\": \"...\" } for ByteDance GenAI)", advanced: true },
   "providers.anthropic": { label: "Anthropic" },
   "providers.anthropic.apiKey": { label: "API Key", sensitive: true, placeholder: "sk-ant-..." },
   "providers.anthropic.model": { label: "Model", placeholder: "claude-sonnet-4-20250514" },
