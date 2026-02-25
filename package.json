@@ -16,14 +16,15 @@
     "daemon:monit": "pm2 monit"
   },
   "dependencies": {
-    "hono": "^4.7.0",
-    "bunqueue": "^2.4.0",
-    "openai": "^4.80.0",
     "@anthropic-ai/sdk": "^0.39.0",
-    "zod": "^3.24.0",
-    "commander": "^13.1.0",
+    "@larksuiteoapi/node-sdk": "^1.59.0",
+    "bunqueue": "^2.4.0",
     "chalk": "^5.4.0",
-    "nanoid": "^5.1.0"
+    "commander": "^13.1.0",
+    "hono": "^4.7.0",
+    "nanoid": "^5.1.0",
+    "openai": "^4.80.0",
+    "zod": "^3.24.0"
   },
   "devDependencies": {
     "@types/bun": "latest",

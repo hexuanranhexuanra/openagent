@@ -19,8 +19,8 @@ export function createCli(): Command {
   program
     .command("gateway")
     .description("Start the OpenAgent gateway server")
-    .option("-p, --port <port>", "Gateway port", "18789")
-    .option("-H, --host <host>", "Gateway host", "127.0.0.1")
+    .option("-p, --port <port>", "Gateway port")
+    .option("-H, --host <host>", "Gateway host")
     .option("-v, --verbose", "Enable verbose logging")
     .action(async (opts) => {
       if (opts.port) process.env.GATEWAY_PORT = opts.port;
@@ -32,6 +32,16 @@ export function createCli(): Command {
 
       const server = startGateway();
 
+      // Start Feishu WebSocket if credentials are configured
+      const feishuAppId = config.channels.feishu.appId || process.env.LARK_APP_ID;
+      const feishuAppSecret = config.channels.feishu.appSecret || process.env.LARK_APP_SECRET;
+      let feishuConnected = false;
+      if (feishuAppId && feishuAppSecret) {
+        const { startFeishuWS } = await import("../channels/feishu-ws.js");
+        startFeishuWS({ appId: feishuAppId, appSecret: feishuAppSecret });
+        feishuConnected = true;
+      }
+
       console.log("");
       console.log(chalk.bold("  🤖 OpenAgent Gateway"));
       console.log(chalk.gray("  ─────────────────────────────────"));
@@ -39,12 +49,19 @@ export function createCli(): Command {
       console.log(`  ${chalk.blue("WS")}      ws://${server.hostname}:${server.port}/ws`);
       console.log(`  ${chalk.magenta("WebChat")} http://${server.hostname}:${server.port}/`);
       console.log(chalk.gray("  ─────────────────────────────────"));
-      console.log(`  Provider: ${chalk.yellow(config.agent.defaultProvider)}`);
+      const { getProviderName } = await import("../agent/index.js");
+      console.log(`  Provider: ${chalk.yellow(getProviderName())}`);
+      if (feishuConnected) {
+        console.log(`  Feishu:   ${chalk.green("connected")} (WebSocket)`);
+      }
       console.log(`  PID:      ${chalk.cyan(String(process.pid))}`);
       console.log("");
 
       const shutdown = () => {
         console.log("\n  Shutting down...");
+        if (feishuConnected) {
+          import("../channels/feishu-ws.js").then(({ stopFeishuWS }) => stopFeishuWS());
+        }
         server.stop();
         process.exit(0);
       };
@@ -171,10 +188,11 @@ export function createCli(): Command {
   program
     .command("status")
     .description("Check gateway status")
-    .option("-p, --port <port>", "Gateway port", "18789")
+    .option("-p, --port <port>", "Gateway port")
     .action(async (opts) => {
+      const port = opts.port || process.env.GATEWAY_PORT || "19090";
       try {
-        const res = await fetch(`http://127.0.0.1:${opts.port}/api/health`);
+        const res = await fetch(`http://127.0.0.1:${port}/api/health`);
         const data = await res.json();
         console.log(chalk.green("  Gateway is running"));
         console.log(JSON.stringify(data, null, 2));
