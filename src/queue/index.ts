@@ -1,4 +1,4 @@
-import { Queue, Worker, type Job } from "bunqueue";
+import { Queue, Worker, type Job } from "bunqueue/client";
 import { createLogger } from "../logger";
 import { runAgent, type AgentStreamEvent } from "../agent";
 
@@ -7,17 +7,25 @@ const log = createLogger("queue");
 let messageQueue: Queue | null = null;
 let messageWorker: Worker | null = null;
 
-interface MessageJobData {
+// ─── Job Types ───
+
+export interface MessageJobData {
+  taskId: string;
   channel: string;
   peerId: string;
   content: string;
   wsClientId?: string;
+  priority?: "high" | "default" | "low";
+  createdAt: number;
 }
 
-type OnStreamCallback = (
-  jobData: MessageJobData,
-  event: AgentStreamEvent,
-) => void;
+export interface JobStreamEvent {
+  taskId: string;
+  jobData: MessageJobData;
+  event: AgentStreamEvent;
+}
+
+type OnStreamCallback = (streamEvent: JobStreamEvent) => void;
 
 let streamCallback: OnStreamCallback | null = null;
 
@@ -25,26 +33,40 @@ export function onJobStream(cb: OnStreamCallback): void {
   streamCallback = cb;
 }
 
-export async function initQueue(): Promise<void> {
+// ─── Queue Init (used by both API and Worker) ───
+
+export async function initQueue(): Promise<Queue> {
+  if (messageQueue) return messageQueue;
+
   messageQueue = new Queue("messages", {
     connection: { mode: "embedded" },
   });
 
+  log.info("Message queue initialized (embedded mode)");
+  return messageQueue;
+}
+
+// ─── Worker Init (only used by Worker process) ───
+
+export async function initWorker(): Promise<void> {
+  if (!messageQueue) await initQueue();
+
   messageWorker = new Worker(
     "messages",
     async (job: Job<MessageJobData>) => {
-      const { channel, peerId, content, wsClientId } = job.data;
-      log.info("Processing message job", { jobId: job.id, channel, peerId });
+      const { taskId, channel, peerId, content } = job.data;
+      log.info("Processing job", { taskId, jobId: job.id, channel, peerId });
 
       try {
         const stream = runAgent(channel, peerId, content);
         for await (const event of stream) {
           if (streamCallback) {
-            streamCallback({ channel, peerId, content, wsClientId }, event);
+            streamCallback({ taskId, jobData: job.data, event });
           }
         }
       } catch (err) {
         log.error("Job processing failed", {
+          taskId,
           jobId: job.id,
           error: err instanceof Error ? err.message : String(err),
         });
@@ -53,7 +75,7 @@ export async function initQueue(): Promise<void> {
     },
     {
       connection: { mode: "embedded" },
-      concurrency: 1,
+      concurrency: 2,
     },
   );
 
@@ -62,35 +84,33 @@ export async function initQueue(): Promise<void> {
   });
 
   messageWorker.on("failed", (job: Job | undefined, err: Error) => {
-    log.error("Job failed", {
+    log.error("Job failed permanently (DLQ)", {
       jobId: job?.id,
       error: err.message,
     });
   });
 
-  log.info("Message queue initialized (embedded mode)");
+  log.info("Worker initialized", { concurrency: 2 });
 }
+
+// ─── Enqueue (used by API process) ───
 
 export async function enqueueMessage(data: MessageJobData): Promise<string> {
-  if (!messageQueue) {
-    throw new Error("Queue not initialized");
-  }
+  const queue = await initQueue();
 
-  const job = await messageQueue.add("chat", data, {
-    removeOnComplete: { count: 100 },
-    removeOnFail: { count: 50 },
+  const job = await queue.add("chat", data, {
+    removeOnComplete: { count: 200 },
+    removeOnFail: { count: 100 },
   });
 
-  log.debug("Message enqueued", { jobId: job.id });
-  return job.id ?? "unknown";
+  log.debug("Message enqueued", { taskId: data.taskId, jobId: job.id });
+  return job.id ?? data.taskId;
 }
 
+// ─── Shutdown ───
+
 export async function shutdownQueue(): Promise<void> {
-  if (messageWorker) {
-    await messageWorker.close();
-  }
-  if (messageQueue) {
-    await messageQueue.close();
-  }
+  if (messageWorker) await messageWorker.close();
+  if (messageQueue) await messageQueue.close();
   log.info("Queue shut down");
 }

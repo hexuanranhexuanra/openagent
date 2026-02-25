@@ -4,6 +4,7 @@ import { createBunWebSocket } from "hono/bun";
 import type { ServerWebSocket } from "bun";
 import { createApiRoutes } from "./routes";
 import { handleWsOpen, handleWsMessage, handleWsClose } from "./websocket";
+import { bearerAuth } from "../middleware/auth";
 import { createLogger } from "../logger";
 import { getConfig } from "../config";
 import { getWebChatHtml } from "./webchat-ui";
@@ -23,15 +24,13 @@ export function createGateway() {
   // ─── Middleware ───
   app.use("*", cors());
 
-  app.use("*", async (c, next) => {
-    const authToken = config.gateway.authToken;
-    if (authToken && c.req.path.startsWith("/api/")) {
-      const token = c.req.header("Authorization")?.replace("Bearer ", "");
-      if (token !== authToken) {
-        return c.json({ error: "Unauthorized" }, 401);
-      }
+  // Auth for API routes (skip webhook endpoints which have their own auth)
+  app.use("/api/*", async (c, next) => {
+    if (c.req.path.startsWith("/api/webhook/")) {
+      await next();
+      return;
     }
-    await next();
+    return bearerAuth(config.gateway.authToken)(c, next);
   });
 
   // ─── API Routes ───

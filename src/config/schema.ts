@@ -31,6 +31,13 @@ export const configSchema = z.object({
     webchat: z.object({
       enabled: z.boolean().default(true),
     }).default({}),
+    feishu: z.object({
+      enabled: z.boolean().default(false),
+      appId: z.string().default(""),
+      appSecret: z.string().default(""),
+      encryptKey: z.string().default(""),
+      verificationToken: z.string().default(""),
+    }).default({}),
     telegram: z.object({
       enabled: z.boolean().default(false),
       botToken: z.string().default(""),

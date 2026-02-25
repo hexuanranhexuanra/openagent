@@ -11,6 +11,7 @@ import {
 import { dateTimeTool } from "./tools/builtin/datetime";
 import { webSearchTool } from "./tools/builtin/web-search";
 import { shellTool } from "./tools/builtin/shell";
+import { memoryTool } from "./tools/builtin/memory";
 import {
   getOrCreateSession,
   appendMessage,
@@ -30,6 +31,7 @@ export function initAgent(): void {
   registerTool(dateTimeTool);
   registerTool(webSearchTool);
   registerTool(shellTool);
+  registerTool(memoryTool);
 
   // Init LLM provider
   const providerName = config.agent.defaultProvider;
