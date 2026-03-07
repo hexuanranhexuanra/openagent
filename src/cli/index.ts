@@ -32,15 +32,37 @@ export function createCli(): Command {
 
       const server = startGateway();
 
-      // Start Feishu WebSocket if credentials are configured
+      // ─── Channel Adapter setup ───
+      const { ChannelManager } = await import("../channels/manager.js");
+      const { getMessageQueue } = await import("../channels/message-queue.js");
+      const { getGatewayAdapter } = await import("../channels/gateway-adapter.js");
+
+      const channelManager = new ChannelManager();
+      const mq = getMessageQueue();
+      const gatewayAdapter = getGatewayAdapter();
+
+      // Route all inbound channel messages into the MessageQueue
+      channelManager.onMessage(async (msg) => {
+        mq.publishInbound(msg);
+      });
+
+      // Start Feishu channel if credentials are configured
       const feishuAppId = config.channels.feishu.appId || process.env.LARK_APP_ID;
       const feishuAppSecret = config.channels.feishu.appSecret || process.env.LARK_APP_SECRET;
       let feishuConnected = false;
       if (feishuAppId && feishuAppSecret) {
-        const { startFeishuWS } = await import("../channels/feishu-ws.js");
-        startFeishuWS({ appId: feishuAppId, appSecret: feishuAppSecret });
+        const { FeishuChannel } = await import("../channels/feishu-ws.js");
+        const feishuChannel = new FeishuChannel({ appId: feishuAppId, appSecret: feishuAppSecret });
+        channelManager.register(feishuChannel);
         feishuConnected = true;
       }
+
+      await channelManager.startAll();
+      channelManager.startOutboundDispatch(mq);
+      // Run GatewayAdapter loop in background (no await)
+      gatewayAdapter.start(mq).catch((err) => {
+        console.error("GatewayAdapter crashed:", err);
+      });
 
       console.log("");
       console.log(chalk.bold("  🤖 OpenAgent Gateway"));
@@ -57,11 +79,11 @@ export function createCli(): Command {
       console.log(`  PID:      ${chalk.cyan(String(process.pid))}`);
       console.log("");
 
-      const shutdown = () => {
+      const shutdown = async () => {
         console.log("\n  Shutting down...");
-        if (feishuConnected) {
-          import("../channels/feishu-ws.js").then(({ stopFeishuWS }) => stopFeishuWS());
-        }
+        gatewayAdapter.stop();
+        mq.stop();
+        await channelManager.stopAll();
         server.stop();
         process.exit(0);
       };

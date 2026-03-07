@@ -13,7 +13,9 @@
     "daemon:stop": "pm2 stop all",
     "daemon:restart": "pm2 restart all",
     "daemon:logs": "pm2 logs",
-    "daemon:monit": "pm2 monit"
+    "daemon:monit": "pm2 monit",
+    "test": "bun test",
+    "test:watch": "bun test --watch"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",

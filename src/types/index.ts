@@ -121,3 +121,7 @@ export interface OutgoingMessage {
   content: string;
   replyToId?: string;
 }
+
+// Canonical aliases used by the Channel Adapter (MessageQueue, GatewayAdapter)
+export type InboundMessage = IncomingMessage;
+export type OutboundMessage = OutgoingMessage;

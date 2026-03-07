@@ -1,23 +1,24 @@
 /**
- * Feishu WebSocket long connection monitor.
+ * FeishuChannel — Feishu/Lark channel adapter using WebSocket long connection.
  *
- * Uses @larksuiteoapi/node-sdk WSClient to establish an outbound connection
- * to Feishu's servers. This eliminates the need for a public webhook URL,
- * ngrok tunnel, or any reverse proxy — only App ID + App Secret are needed.
+ * Implements the Channel interface:
+ *   start()     → establishes WS connection to Feishu servers (no public URL needed)
+ *   stop()      → tears down the connection
+ *   onMessage() → registers the inbound handler (called by ChannelManager)
+ *   send()      → delivers an outbound message via the Lark SDK
  *
- * Inspired by OpenClaw's extensions/feishu implementation.
+ * When a message arrives, it publishes an IncomingMessage to the handler
+ * (which ChannelManager routes into the inbound MessageQueue).
+ * When the agent responds, ChannelManager calls send() with the OutboundMessage.
  */
 import * as Lark from "@larksuiteoapi/node-sdk";
 import { createLogger } from "../logger";
-import { runAgent } from "../agent";
+import type { Channel } from "./base";
+import type { IncomingMessage, OutgoingMessage } from "../types";
 
-const log = createLogger("channel:feishu-ws");
+const log = createLogger("channel:feishu");
 
-let wsClient: Lark.WSClient | null = null;
-let larkClient: Lark.Client | null = null;
-let abortController: AbortController | null = null;
-
-export interface FeishuWSConfig {
+export interface FeishuChannelConfig {
   appId: string;
   appSecret: string;
   /** "feishu" (default) or "lark" for international */
@@ -39,165 +40,152 @@ interface FeishuMessageEvent {
   };
 }
 
-function resolveDomain(domain?: "feishu" | "lark"): Lark.Domain {
-  return domain === "lark" ? Lark.Domain.Lark : Lark.Domain.Feishu;
-}
+export class FeishuChannel implements Channel {
+  readonly type = "feishu";
 
-/**
- * Reply to a Feishu message using the official SDK.
- */
-async function replyMessage(messageId: string, text: string): Promise<void> {
-  if (!larkClient) {
-    log.error("Lark client not initialized, cannot reply");
-    return;
+  private config: FeishuChannelConfig;
+  private wsClient: Lark.WSClient | null = null;
+  private larkClient: Lark.Client | null = null;
+  private handler: ((msg: IncomingMessage) => Promise<void>) | null = null;
+
+  constructor(config: FeishuChannelConfig) {
+    this.config = config;
   }
-  try {
-    await larkClient.im.message.reply({
-      path: { message_id: messageId },
-      data: {
-        msg_type: "text",
-        content: JSON.stringify({ text }),
+
+  onMessage(handler: (msg: IncomingMessage) => Promise<void>): void {
+    this.handler = handler;
+  }
+
+  async start(): Promise<void> {
+    const { appId, appSecret } = this.config;
+    const larkDomain = this.config.domain === "lark" ? Lark.Domain.Lark : Lark.Domain.Feishu;
+
+    this.larkClient = new Lark.Client({
+      appId,
+      appSecret,
+      appType: Lark.AppType.SelfBuild,
+      domain: larkDomain,
+    });
+
+    const eventDispatcher = new Lark.EventDispatcher({});
+    eventDispatcher.register({
+      "im.message.receive_v1": async (data) => {
+        try {
+          await this.handleIncoming(data as unknown as FeishuMessageEvent);
+        } catch (err) {
+          log.error("Error in message handler", {
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      },
+      "im.chat.member.bot.added_v1": async (data) => {
+        const event = data as unknown as { chat_id?: string };
+        log.info("Bot added to chat", { chatId: event.chat_id });
+      },
+      "im.chat.member.bot.deleted_v1": async (data) => {
+        const event = data as unknown as { chat_id?: string };
+        log.info("Bot removed from chat", { chatId: event.chat_id });
       },
     });
-    log.debug("Reply sent", { messageId });
-  } catch (err) {
-    log.error("Failed to reply", {
-      messageId,
-      error: err instanceof Error ? err.message : String(err),
+
+    this.wsClient = new Lark.WSClient({
+      appId,
+      appSecret,
+      domain: larkDomain,
+      loggerLevel: Lark.LoggerLevel.info,
     });
-  }
-}
 
-/**
- * Handle an incoming message event from Feishu.
- */
-async function handleMessage(event: FeishuMessageEvent): Promise<void> {
-  const senderId = event.sender.sender_id.open_id;
-  const messageId = event.message.message_id;
-  const messageType = event.message.message_type;
-  const chatType = event.message.chat_type;
-
-  if (messageType !== "text") {
-    log.debug("Skipping non-text message", { messageType, messageId });
-    return;
+    this.wsClient.start({ eventDispatcher });
+    log.info("FeishuChannel started (WS mode)", { appId: appId.slice(0, 8) + "..." });
   }
 
-  let textContent = "";
-  try {
-    const parsed = JSON.parse(event.message.content) as { text?: string };
-    textContent = parsed.text ?? "";
-  } catch {
-    textContent = event.message.content ?? "";
+  async stop(): Promise<void> {
+    // WSClient doesn't expose a stop() in the SDK; nulling refs is sufficient
+    this.wsClient = null;
+    this.larkClient = null;
+    log.info("FeishuChannel stopped");
   }
 
-  // Strip @bot mentions (format: @_user_x)
-  textContent = textContent.replace(/@_user_\d+\s*/g, "").trim();
-  if (!textContent) {
-    log.debug("Empty message after mention strip", { messageId });
-    return;
-  }
-
-  log.info("Message received", {
-    from: senderId,
-    chatType,
-    messageId,
-    textLength: textContent.length,
-  });
-
-  try {
-    let fullResponse = "";
-    const stream = runAgent("feishu", senderId, textContent);
-    for await (const evt of stream) {
-      if (evt.type === "text") fullResponse += evt.content ?? "";
-      if (evt.type === "error") {
-        log.error("Agent error", { error: evt.error, messageId });
-        fullResponse = `Error: ${evt.error}`;
-        break;
-      }
+  async send(message: OutgoingMessage): Promise<void> {
+    if (!this.larkClient) {
+      log.error("Lark client not initialized, cannot send");
+      return;
     }
 
-    if (fullResponse) {
-      await replyMessage(messageId, fullResponse);
-    }
-  } catch (err) {
-    log.error("Failed to handle message", {
-      messageId,
-      error: err instanceof Error ? err.message : String(err),
-    });
-  }
-}
-
-/**
- * Start the Feishu WebSocket long connection.
- * Only requires appId + appSecret. No webhook URL, no tunnel, no public IP.
- */
-export function startFeishuWS(config: FeishuWSConfig): void {
-  const { appId, appSecret, domain } = config;
-
-  if (!appId || !appSecret) {
-    log.warn("Feishu credentials not configured, skipping WebSocket connection");
-    return;
-  }
-
-  // Create the API client (for sending replies)
-  larkClient = new Lark.Client({
-    appId,
-    appSecret,
-    appType: Lark.AppType.SelfBuild,
-    domain: resolveDomain(domain),
-  });
-
-  // Create event dispatcher with handlers
-  const eventDispatcher = new Lark.EventDispatcher({});
-
-  eventDispatcher.register({
-    "im.message.receive_v1": async (data) => {
-      try {
-        const event = data as unknown as FeishuMessageEvent;
-        await handleMessage(event);
-      } catch (err) {
-        log.error("Error in message handler", {
-          error: err instanceof Error ? err.message : String(err),
+    try {
+      if (message.replyToId) {
+        // Thread reply to the original message
+        await this.larkClient.im.message.reply({
+          path: { message_id: message.replyToId },
+          data: {
+            msg_type: "text",
+            content: JSON.stringify({ text: message.content }),
+          },
+        });
+      } else {
+        // Direct message to the user
+        await this.larkClient.im.message.create({
+          params: { receive_id_type: "open_id" },
+          data: {
+            receive_id: message.peerId,
+            msg_type: "text",
+            content: JSON.stringify({ text: message.content }),
+          },
         });
       }
-    },
-    "im.chat.member.bot.added_v1": async (data) => {
-      const event = data as unknown as { chat_id?: string };
-      log.info("Bot added to chat", { chatId: event.chat_id });
-    },
-    "im.chat.member.bot.deleted_v1": async (data) => {
-      const event = data as unknown as { chat_id?: string };
-      log.info("Bot removed from chat", { chatId: event.chat_id });
-    },
-  });
+      log.debug("Message sent", { peerId: message.peerId, replyToId: message.replyToId });
+    } catch (err) {
+      log.error("Failed to send message", {
+        error: err instanceof Error ? err.message : String(err),
+        peerId: message.peerId,
+      });
+    }
+  }
 
-  // Create WebSocket client and connect
-  wsClient = new Lark.WSClient({
-    appId,
-    appSecret,
-    domain: resolveDomain(domain),
-    loggerLevel: Lark.LoggerLevel.info,
-  });
+  private async handleIncoming(event: FeishuMessageEvent): Promise<void> {
+    if (!this.handler) {
+      log.warn("No message handler registered, dropping message");
+      return;
+    }
 
-  abortController = new AbortController();
+    const { message, sender } = event;
 
-  try {
-    wsClient.start({ eventDispatcher });
-    log.info("Feishu WebSocket connected", { appId: appId.slice(0, 8) + "..." });
-  } catch (err) {
-    log.error("Failed to start Feishu WebSocket", {
-      error: err instanceof Error ? err.message : String(err),
+    if (message.message_type !== "text") {
+      log.debug("Skipping non-text message", { messageType: message.message_type });
+      return;
+    }
+
+    let textContent = "";
+    try {
+      const parsed = JSON.parse(message.content) as { text?: string };
+      textContent = parsed.text ?? "";
+    } catch {
+      textContent = message.content ?? "";
+    }
+
+    // Strip @bot mention prefix
+    textContent = textContent.replace(/@_user_\d+\s*/g, "").trim();
+    if (!textContent) {
+      log.debug("Empty after mention strip", { messageId: message.message_id });
+      return;
+    }
+
+    const peerId = sender.sender_id.open_id;
+    log.info("Message received", {
+      peerId,
+      chatType: message.chat_type,
+      messageId: message.message_id,
+      textLength: textContent.length,
+    });
+
+    await this.handler({
+      channelType: "feishu",
+      channelId: message.chat_id,
+      peerId,
+      content: textContent,
+      timestamp: Date.now(),
+      // Pass messageId through raw so GatewayAdapter can set replyToId on OutboundMessage
+      raw: { messageId: message.message_id, chatId: message.chat_id },
     });
   }
-}
-
-/**
- * Stop the Feishu WebSocket connection.
- */
-export function stopFeishuWS(): void {
-  abortController?.abort();
-  wsClient = null;
-  larkClient = null;
-  abortController = null;
-  log.info("Feishu WebSocket stopped");
 }

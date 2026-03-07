@@ -14,7 +14,11 @@ const clients = new Map<string, ServerWebSocket<WSClientData>>();
 
 export function handleWsOpen(ws: ServerWebSocket<WSClientData>): void {
   const clientId = nanoid(12);
-  ws.data = { id: clientId, peerId: `webchat:${clientId}` };
+  // Merge into existing ws.data rather than replacing it — Hono stores its
+  // internal event handlers in ws.data.events and the safeWebsocket guard
+  // in server.ts checks for that key. Overwriting would drop `events` and
+  // cause every subsequent message to be rejected with code 1008.
+  Object.assign(ws.data as unknown as Record<string, unknown>, { id: clientId, peerId: `webchat:${clientId}` });
   clients.set(clientId, ws);
   log.info("WebSocket connected", { clientId });
 
