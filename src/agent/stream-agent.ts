@@ -1,6 +1,8 @@
 import { createLogger } from "../logger";
 import { appendMessage, getSessionMessages } from "../sessions/manager";
 import { executeTool } from "./tools/registry";
+import { LoopDetector } from "./loop-detector";
+import { setCurrentRunContext } from "./subagent-registry";
 import type { AgentContext } from "./context";
 import type { AgentStreamEvent } from "./types";
 import type { LLMProvider } from "./providers/base";
@@ -23,6 +25,7 @@ export class StreamAgent {
 
   async *run(ctx: AgentContext, signal: AbortSignal): AsyncGenerator<AgentStreamEvent> {
     let round = 0;
+    const loopDetector = new LoopDetector();
 
     while (round < ctx.maxRounds) {
       if (signal.aborted) return;
@@ -76,6 +79,9 @@ export class StreamAgent {
       // No tool calls → natural end of ReAct loop
       if (pendingToolCalls.length === 0) break;
 
+      // Expose current session identity to tools (e.g. sessions_spawn).
+      setCurrentRunContext({ channel: ctx.channel, peerId: ctx.peerId, depth: ctx.depth });
+
       for (const tc of pendingToolCalls) {
         if (signal.aborted) return;
 
@@ -87,9 +93,46 @@ export class StreamAgent {
           toolArgs = {};
         }
 
+        // Check for loops BEFORE executing — avoids wasting a tool call
+        const loopCheck = loopDetector.check(toolName, toolArgs);
+        if (loopCheck.stuck && loopCheck.level === "critical") {
+          log.warn("Loop detector: critical — aborting run", {
+            sessionId: ctx.sessionId,
+            message: loopCheck.message,
+          });
+          // Persist a synthetic tool result so the LLM turn is valid, then surface the error
+          appendMessage(ctx.sessionId, {
+            role: "tool",
+            content: `[LOOP DETECTED] ${loopCheck.message}`,
+            toolCallId: tc.id,
+            timestamp: Date.now(),
+          });
+          // Remaining tool calls in this batch also need synthetic results
+          for (const remaining of pendingToolCalls.slice(pendingToolCalls.indexOf(tc) + 1)) {
+            appendMessage(ctx.sessionId, {
+              role: "tool",
+              content: "[Skipped — loop detection aborted the run]",
+              toolCallId: remaining.id,
+              timestamp: Date.now(),
+            });
+          }
+          yield { type: "error", error: loopCheck.message };
+          return;
+        }
+
         yield { type: "tool_start", toolName, toolArgs };
 
-        const result = await executeTool(toolName, toolArgs);
+        let result = await executeTool(toolName, toolArgs);
+
+        // Append loop warning to the tool result so the LLM self-corrects next round
+        if (loopCheck.stuck && loopCheck.level === "warning") {
+          log.warn("Loop detector: warning", {
+            sessionId: ctx.sessionId,
+            toolName,
+            message: loopCheck.message,
+          });
+          result += `\n\n[LOOP WARNING] ${loopCheck.message}`;
+        }
 
         yield { type: "tool_result", toolName, toolResult: result };
 

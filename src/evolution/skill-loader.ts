@@ -125,20 +125,21 @@ export class SkillLoader {
   }
 
   /**
-   * Create a new skill file from source code.
+   * Create or overwrite a skill file from source code.
    */
-  async createSkill(filename: string, sourceCode: string): Promise<string> {
+  async createSkill(filename: string, sourceCode: string, overwrite = false): Promise<string> {
     if (!filename.endsWith(".skill.ts")) {
       filename = `${filename}.skill.ts`;
     }
 
     const fullPath = resolve(this.skillsDir, filename);
-    if (existsSync(fullPath)) {
-      throw new Error(`Skill already exists: ${filename}`);
+    if (existsSync(fullPath) && !overwrite) {
+      throw new Error(`Skill already exists: ${filename}. Pass overwrite=true to update it.`);
     }
 
+    const isUpdate = existsSync(fullPath);
     await Bun.write(fullPath, sourceCode);
-    log.info("Skill file created", { filename });
+    log.info(isUpdate ? "Skill updated" : "Skill created", { filename });
     return fullPath;
   }
 

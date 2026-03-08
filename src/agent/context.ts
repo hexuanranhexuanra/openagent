@@ -9,6 +9,7 @@ import {
   getSessionMessages,
 } from "../sessions/manager";
 import { getAllToolDefinitions } from "./tools/registry";
+import { getSubagentDepth } from "./subagent-registry";
 import type { LLMProvider } from "./providers/base";
 import type { ChatMessage, ToolDefinition } from "../types/index";
 
@@ -16,6 +17,10 @@ const log = createLogger("agent:context");
 
 export interface AgentContext {
   sessionId: string;
+  channel: string;
+  peerId: string;
+  /** 0 = top-level user session; 1+ = nested subagent depth. */
+  depth: number;
   messages: ChatMessage[];
   systemPrompt: string;
   tools: ToolDefinition[];
@@ -27,7 +32,7 @@ export interface AgentContext {
  *
  * Responsibilities:
  * - Session lookup and user message persistence
- * - Memory consolidation when the session window is full
+ * - Memory consolidation when the session token budget is exceeded
  * - System prompt construction: base + SOUL/USER/WORLD + MEMORY.md + skills catalog
  * - Tool list assembly
  */
@@ -38,11 +43,12 @@ export class ContextBuilder {
     const config = getConfig();
     const session = getOrCreateSession(channel, peerId);
 
+    // Resolve nesting depth: subagent sessions carry the depth in the registry.
+    const depth = channel === "subagent" ? getSubagentDepth(peerId) : 0;
+
     // Consolidate old messages before appending the new user message so that
     // the updated MEMORY.md is included in the system prompt below.
-    const maxHistory = config.agent.maxHistoryMessages;
-    const consolidationThreshold = Math.floor(maxHistory * 0.8);
-    await consolidateIfNeeded(session.id, this.provider, consolidationThreshold);
+    await consolidateIfNeeded(session.id, this.provider, config.agent.contextWindow);
 
     appendMessage(session.id, {
       role: "user",
@@ -56,6 +62,9 @@ export class ContextBuilder {
 
     return {
       sessionId: session.id,
+      channel,
+      peerId,
+      depth,
       messages,
       systemPrompt,
       tools,
@@ -110,6 +119,8 @@ export class ContextBuilder {
           "- skill_create: Create reusable skill scripts for recurring tasks\n" +
           "- self_modify: Modify your own source code (within safety boundaries)\n" +
           "- read_file/write_file: Work with files in user-space/workspace/\n" +
+          "- sessions_spawn: Spawn an independent subagent to run a task concurrently.\n" +
+          "  The subagent will notify you when done — do NOT poll for its status.\n" +
           "Evolve yourself to serve the user better over time.",
       );
 

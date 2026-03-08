@@ -10,6 +10,9 @@ import { getConfig } from "../config";
 import { buildConfigSchemaBundle } from "../config/json-schema";
 import { getMemoryStore } from "../evolution/memory";
 import { getSkillLoader } from "../evolution/skill-loader";
+import { getCronService, nextRunDate } from "../background/cron";
+import { getHeartbeatService } from "../background/heartbeat";
+import { listSubagentRuns } from "../agent/subagent-registry";
 
 export function createApiRoutes(): Hono {
   const api = new Hono();
@@ -283,6 +286,74 @@ export function createApiRoutes(): Hono {
       files: loader.listSkillFiles(),
       loaded: loader.getCatalog(),
     });
+  });
+
+  // ─── Cron Jobs ───
+
+  api.get("/cron/jobs", (c) => {
+    return c.json({ jobs: getCronService().listJobs() });
+  });
+
+  api.post("/cron/jobs", async (c) => {
+    const body = await c.req.json().catch(() => null);
+    if (!body?.name || !body?.cron_expr || !body?.task) {
+      return c.json({ error: "Required: name, cron_expr, task" }, 400);
+    }
+    try {
+      // Validate cron expression before adding
+      nextRunDate(body.cron_expr);
+      const job = getCronService().addJob({
+        name: body.name,
+        cron: body.cron_expr,
+        task: body.task,
+        target: {
+          channel: body.target_channel ?? "webchat",
+          peerId: body.target_peer ?? "broadcast",
+        },
+      });
+      return c.json({ job });
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+    }
+  });
+
+  api.delete("/cron/jobs/:id", (c) => {
+    const id = c.req.param("id");
+    const removed = getCronService().removeJob(id);
+    return c.json({ removed, id });
+  });
+
+  api.post("/cron/jobs/:id/trigger", async (c) => {
+    const id = c.req.param("id");
+    const triggered = await getCronService().triggerNow(id);
+    if (!triggered) return c.json({ error: "Job not found" }, 404);
+    return c.json({ triggered: true, id });
+  });
+
+  // ─── Subagents ───
+
+  api.get("/subagents", (c) => {
+    return c.json({ subagents: listSubagentRuns() });
+  });
+
+  // ─── Heartbeat ───
+
+  api.get("/heartbeat", async (c) => {
+    const { existsSync, readFileSync } = await import("node:fs");
+    const { resolve } = await import("node:path");
+    const path = resolve(process.cwd(), "user-space", "memory", "HEARTBEAT.md");
+    if (!existsSync(path)) return c.json({ tasks: [], content: "" });
+    const content = readFileSync(path, "utf-8");
+    const tasks = content
+      .split("\n")
+      .filter((l) => /^-\s+\[\s+\]/.test(l))
+      .map((l) => l.replace(/^-\s+\[\s+\]\s*/, "").trim());
+    return c.json({ tasks, content });
+  });
+
+  api.post("/heartbeat/tick", async (c) => {
+    getHeartbeatService().tick().catch(() => {});
+    return c.json({ triggered: true });
   });
 
   return api;

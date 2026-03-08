@@ -4,6 +4,7 @@ import type { LLMProvider } from "./providers/base";
 import { OpenAIProvider } from "./providers/openai";
 import { AnthropicProvider } from "./providers/anthropic";
 import { ByteDanceGenAIProvider } from "./providers/bytedance-genai";
+import { ClaudeCodeProvider } from "./providers/claude-code";
 import { registerTool } from "./tools/registry";
 import { dateTimeTool } from "./tools/builtin/datetime";
 import { webSearchTool } from "./tools/builtin/web-search";
@@ -17,7 +18,10 @@ import {
   skillCreateTool,
   skillListTool,
   selfModifyTool,
+  subagentSpawnTool,
 } from "./tools/builtin/evolution-tools";
+import { cronTool } from "./tools/builtin/cron-tool";
+import { heartbeatTool } from "./tools/builtin/heartbeat-tool";
 import { getSkillLoader } from "../evolution/skill-loader";
 import { initContextBuilder } from "./context";
 import { initAgentEngine, getAgentEngine } from "./engine";
@@ -44,6 +48,9 @@ export async function initAgent(): Promise<void> {
   registerTool(skillCreateTool);
   registerTool(skillListTool);
   registerTool(selfModifyTool);
+  registerTool(cronTool);
+  registerTool(heartbeatTool);
+  registerTool(subagentSpawnTool);
 
   const provider = buildProvider();
   _providerName = provider.name;
@@ -63,6 +70,10 @@ function buildProvider(): LLMProvider {
   const isByteDance =
     (oai.queryParams?.ak && oai.baseUrl?.includes("byteintl.net")) ||
     oai.baseUrl?.includes("tiktok-row.org");
+
+  if (providerName === "claude-code") {
+    return new ClaudeCodeProvider();
+  }
 
   if (providerName === "anthropic") {
     if (!config.providers.anthropic.apiKey) {

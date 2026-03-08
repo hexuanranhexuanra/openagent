@@ -2,6 +2,7 @@ import type { ToolHandler } from "../../../types";
 import { getMemoryStore } from "../../../evolution/memory";
 import { getSkillLoader } from "../../../evolution/skill-loader";
 import { getSelfModifier } from "../../../evolution/self-modify";
+import { getCurrentRunContext, spawnSubagent } from "../../subagent-registry";
 
 /**
  * Update a section in SOUL.md, USER.md, or WORLD.md.
@@ -167,9 +168,10 @@ export const skillCreateTool: ToolHandler = {
   definition: {
     name: "skill_create",
     description:
-      "Create a new dynamic skill script in user-space/skills/. " +
+      "Create or update a dynamic skill script in user-space/skills/. " +
       "The script must export a default object with { name, description, parameters, execute }. " +
-      "Filename should end with .skill.ts. After creation the skill is immediately available via skill_use.",
+      "Filename should end with .skill.ts. The skill is immediately available after creation. " +
+      "To fix or improve an existing skill, pass overwrite=true with the corrected source.",
     parameters: {
       type: "object",
       properties: {
@@ -181,6 +183,10 @@ export const skillCreateTool: ToolHandler = {
           type: "string",
           description: "Full TypeScript source code for the skill",
         },
+        overwrite: {
+          type: "boolean",
+          description: "Set to true to replace an existing skill file. Defaults to false.",
+        },
       },
       required: ["filename", "source"],
     },
@@ -189,14 +195,14 @@ export const skillCreateTool: ToolHandler = {
   async execute(args) {
     const filename = args.filename as string;
     const source = args.source as string;
+    const overwrite = (args.overwrite as boolean) ?? false;
 
     try {
       const loader = getSkillLoader();
-      const path = await loader.createSkill(filename, source);
-      // Hot-reload so it appears in the catalog immediately.
+      const path = await loader.createSkill(filename, source, overwrite);
       const normalised = filename.endsWith(".skill.ts") ? filename : `${filename}.skill.ts`;
       await loader.hotReload(normalised);
-      return JSON.stringify({ created: path });
+      return JSON.stringify({ [overwrite ? "updated" : "created"]: path });
     } catch (err) {
       return JSON.stringify({ error: err instanceof Error ? err.message : String(err) });
     }
@@ -221,6 +227,63 @@ export const skillListTool: ToolHandler = {
     const loader = getSkillLoader();
     const catalog = loader.getCatalog();
     return JSON.stringify({ skills: catalog });
+  },
+};
+
+/**
+ * Spawn an independent subagent to work on a task concurrently.
+ * The subagent runs in the background and delivers its result back to the
+ * parent session as a new user message when done.
+ */
+export const subagentSpawnTool: ToolHandler = {
+  definition: {
+    name: "sessions_spawn",
+    description:
+      "Spawn an independent subagent to work on a task concurrently in the background. " +
+      "The subagent runs independently and will deliver its result back to you as a user " +
+      "message when done. Do NOT poll for status — you will be notified automatically. " +
+      "Use this to parallelise independent sub-tasks (e.g. research multiple topics at once).",
+    parameters: {
+      type: "object",
+      properties: {
+        task: {
+          type: "string",
+          description: "Full task description for the subagent. Be explicit and self-contained.",
+        },
+        label: {
+          type: "string",
+          description: "Short label identifying this subagent (e.g. 'research-topic-a')",
+        },
+        timeout_seconds: {
+          type: "number",
+          description: "Max seconds to allow the subagent to run (default: 300)",
+        },
+      },
+      required: ["task"],
+    },
+  },
+
+  async execute(args) {
+    const task = args.task as string;
+    const label = (args.label as string | undefined) ?? task.slice(0, 50);
+    const timeoutMs =
+      typeof args.timeout_seconds === "number" ? args.timeout_seconds * 1000 : 300_000;
+
+    const ctx = getCurrentRunContext();
+    if (!ctx) {
+      return JSON.stringify({ error: "No run context available — cannot spawn subagent." });
+    }
+
+    const outcome = spawnSubagent({
+      task,
+      label,
+      parentChannel: ctx.channel,
+      parentPeerId: ctx.peerId,
+      parentDepth: ctx.depth,
+      timeoutMs,
+    });
+
+    return JSON.stringify(outcome);
   },
 };
 

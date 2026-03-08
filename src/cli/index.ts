@@ -30,6 +30,11 @@ export function createCli(): Command {
       setLogLevel(opts.verbose ? "debug" : config.logging.level);
       await initAgent();
 
+      // Start background services (must be after initAgent and startGateway
+      // so WebSocket broadcast is available)
+      const { initBackgroundServices } = await import("../background/index.js");
+      const bg = initBackgroundServices();
+
       const server = startGateway();
 
       // ─── Channel Adapter setup ───
@@ -79,8 +84,14 @@ export function createCli(): Command {
       console.log(`  PID:      ${chalk.cyan(String(process.pid))}`);
       console.log("");
 
+      // Start background services after the server is bound
+      bg.cron.start();
+      bg.heartbeat.start();
+
       const shutdown = async () => {
         console.log("\n  Shutting down...");
+        bg.cron.stop();
+        bg.heartbeat.stop();
         gatewayAdapter.stop();
         mq.stop();
         await channelManager.stopAll();
