@@ -39,6 +39,9 @@ function mergeEnvOverrides(base: Record<string, unknown>): Record<string, unknow
   if (!merged.providers.anthropic) merged.providers.anthropic = {};
   if (env.ANTHROPIC_API_KEY) merged.providers.anthropic.apiKey = env.ANTHROPIC_API_KEY;
   if (env.ANTHROPIC_MODEL) merged.providers.anthropic.model = env.ANTHROPIC_MODEL;
+  // Support both naming conventions for the OAuth token
+  const setupToken = env.ANTHROPIC_SETUP_TOKEN ?? env.CLAUDE_CODE_OAUTH_TOKEN;
+  if (setupToken) merged.providers.anthropic.setupToken = setupToken;
 
   if (!merged.agent) merged.agent = {};
   if (env.DEFAULT_PROVIDER) (merged.agent as Record<string, unknown>).defaultProvider = env.DEFAULT_PROVIDER;

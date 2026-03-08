@@ -32,7 +32,12 @@ export const configSchema = z.object({
     }).default({}),
     anthropic: z.object({
       apiKey: z.string().default(""),
-      model: z.string().default("claude-sonnet-4-20250514"),
+      model: z.string().default("claude-opus-4-6"),
+      /**
+       * OAuth token from `claude setup-token`. When set, takes precedence over
+       * apiKey and uses Bearer auth (Claude subscription billing, not API key).
+       */
+      setupToken: z.string().optional(),
     }).default({}),
   }).default({}),
 

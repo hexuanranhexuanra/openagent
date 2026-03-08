@@ -68,26 +68,29 @@ function buildProvider(): LLMProvider {
   const config = getConfig();
   const providerName = config.agent.defaultProvider;
   const oai = config.providers.openai;
-
-  const isByteDance =
-    (oai.queryParams?.ak && oai.baseUrl?.includes("byteintl.net")) ||
-    oai.baseUrl?.includes("tiktok-row.org");
+  const ant = config.providers.anthropic;
 
   if (providerName === "claude-code") {
     return new ClaudeCodeProvider();
   }
 
+  // setupToken auto-activates Anthropic regardless of defaultProvider setting.
+  if (ant.setupToken) {
+    return new AnthropicProvider(ant.apiKey, ant.model, ant.setupToken);
+  }
+
+  const isByteDance =
+    (oai.queryParams?.ak && oai.baseUrl?.includes("byteintl.net")) ||
+    oai.baseUrl?.includes("tiktok-row.org");
+
   if (providerName === "anthropic") {
-    if (!config.providers.anthropic.apiKey) {
+    if (!ant.apiKey) {
       log.warn("Anthropic API key not set, falling back to OpenAI");
       return isByteDance
         ? new ByteDanceGenAIProvider(oai.model, oai.baseUrl, oai.queryParams.ak)
         : new OpenAIProvider(oai.apiKey, oai.model, oai.baseUrl, oai.queryParams);
     }
-    return new AnthropicProvider(
-      config.providers.anthropic.apiKey,
-      config.providers.anthropic.model,
-    );
+    return new AnthropicProvider(ant.apiKey, ant.model);
   }
 
   if (isByteDance) {

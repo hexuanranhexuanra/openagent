@@ -1,1 +1,10 @@
-{"agent":{"defaultProvider":"claude-code"}}
+{
+  "agent": {
+    "defaultProvider": "anthropic"
+  },
+  "providers": {
+    "anthropic": {
+      "model": "claude-opus-4-6"
+    }
+  }
+}

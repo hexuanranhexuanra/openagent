@@ -10,10 +10,21 @@ export class AnthropicProvider implements LLMProvider {
   private client: Anthropic;
   private model: string;
 
-  constructor(apiKey: string, model: string) {
-    this.client = new Anthropic({ apiKey });
+  constructor(apiKey: string, model: string, setupToken?: string) {
+    if (setupToken) {
+      // OAuth Bearer token from CLAUDE_CODE_OAUTH_TOKEN — uses Claude subscription billing.
+      // Requires anthropic-beta: oauth-2025-04-20 header to enable OAuth auth on the API.
+      this.client = new Anthropic({
+        authToken: setupToken,
+        apiKey: null as unknown as string,
+        defaultHeaders: { "anthropic-beta": "oauth-2025-04-20" },
+      });
+      log.info("Anthropic provider initialized (setup-token / OAuth)", { model });
+    } else {
+      this.client = new Anthropic({ apiKey });
+      log.info("Anthropic provider initialized", { model });
+    }
     this.model = model;
-    log.info("Anthropic provider initialized", { model });
   }
 
   async *chat(
@@ -84,7 +95,7 @@ export class AnthropicProvider implements LLMProvider {
             // Accumulating tool call JSON - handled at content_block_stop
           }
         } else if (event.type === "content_block_stop") {
-          const snapshot = await stream.currentMessage();
+          const snapshot = stream.currentMessage;
           if (snapshot) {
             for (const block of snapshot.content) {
               if (block.type === "tool_use") {

@@ -22,3 +22,9 @@ Learn Ran through every conversation — thinking patterns, preferences, blind s
 **Lessons Learned**
 
 _(Mistakes and insights recorded here to avoid repeating them.)_
+
+## Lessons Learned
+
+_(Mistakes and insights recorded here to avoid repeating them.)_
+
+- 2026-03-08: 不应该基于推测来声明自己的底层模型。用户质疑时要承认不确定性，而不是坚持可能错误的假设。
