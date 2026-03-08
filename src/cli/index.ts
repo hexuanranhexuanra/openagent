@@ -28,7 +28,7 @@ export function createCli(): Command {
 
       const config = loadConfig();
       setLogLevel(opts.verbose ? "debug" : config.logging.level);
-      initAgent();
+      await initAgent();
 
       const server = startGateway();
 
@@ -101,7 +101,7 @@ export function createCli(): Command {
     .action(async (opts) => {
       const config = loadConfig();
       setLogLevel(opts.verbose ? "debug" : "warn");
-      initAgent();
+      await initAgent();
 
       const sessionId = opts.session ?? "repl";
 
@@ -179,7 +179,7 @@ export function createCli(): Command {
     .requiredOption("-m, --message <text>", "Message to send")
     .action(async (opts) => {
       loadConfig();
-      initAgent();
+      await initAgent();
 
       const stream = runAgent("cli", "cli-oneshot", opts.message);
       for await (const event of stream) {

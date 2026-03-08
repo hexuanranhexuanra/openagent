@@ -30,9 +30,17 @@ function getDb(): Database {
       messages TEXT NOT NULL DEFAULT '[]',
       metadata TEXT NOT NULL DEFAULT '{}',
       created_at INTEGER NOT NULL,
-      updated_at INTEGER NOT NULL
+      updated_at INTEGER NOT NULL,
+      last_consolidated INTEGER NOT NULL DEFAULT 0
     )
   `);
+
+  // Migrate existing tables that pre-date the last_consolidated column.
+  try {
+    db.exec("ALTER TABLE sessions ADD COLUMN last_consolidated INTEGER NOT NULL DEFAULT 0");
+  } catch {
+    // Column already exists — ignore.
+  }
 
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_sessions_channel_peer
@@ -95,28 +103,29 @@ export function getOrCreateSession(channel: string, peerId: string): Session {
 export function appendMessage(sessionId: string, message: ChatMessage): void {
   const database = getDb();
   const config = getConfig();
-
-  const row = database
-    .query("SELECT messages FROM sessions WHERE id = ?")
-    .get(sessionId) as Record<string, unknown> | null;
-
-  if (!row) {
-    log.warn("Session not found for append", { id: sessionId });
-    return;
-  }
-
-  const messages = JSON.parse(row.messages as string) as ChatMessage[];
-  messages.push(message);
-
-  // Trim to max history
   const maxHistory = config.agent.maxHistoryMessages;
-  const trimmed = messages.length > maxHistory
-    ? messages.slice(messages.length - maxHistory)
-    : messages;
 
-  database
-    .query("UPDATE sessions SET messages = ?, updated_at = ? WHERE id = ?")
-    .run(JSON.stringify(trimmed), Date.now(), sessionId);
+  database.transaction(() => {
+    const row = database
+      .query("SELECT messages FROM sessions WHERE id = ?")
+      .get(sessionId) as Record<string, unknown> | null;
+
+    if (!row) {
+      log.warn("Session not found for append", { id: sessionId });
+      return;
+    }
+
+    const messages = JSON.parse(row.messages as string) as ChatMessage[];
+    messages.push(message);
+
+    const trimmed = messages.length > maxHistory
+      ? messages.slice(messages.length - maxHistory)
+      : messages;
+
+    database
+      .query("UPDATE sessions SET messages = ?, updated_at = ? WHERE id = ?")
+      .run(JSON.stringify(trimmed), Date.now(), sessionId);
+  })();
 }
 
 export function getSessionMessages(sessionId: string): ChatMessage[] {
@@ -136,6 +145,33 @@ export function resetSession(sessionId: string): void {
     .query("UPDATE sessions SET messages = '[]', updated_at = ? WHERE id = ?")
     .run(Date.now(), sessionId);
   log.info("Session reset", { id: sessionId });
+}
+
+/**
+ * Remove the oldest `count` messages from a session's history and increment
+ * last_consolidated by the same amount. Called after successful consolidation.
+ */
+export function removeConsolidatedMessages(sessionId: string, count: number): void {
+  const database = getDb();
+  database.transaction(() => {
+    const row = database
+      .query("SELECT messages, last_consolidated FROM sessions WHERE id = ?")
+      .get(sessionId) as Record<string, unknown> | null;
+
+    if (!row) return;
+
+    const messages = JSON.parse(row.messages as string) as ChatMessage[];
+    const trimmed = messages.slice(count);
+    const consolidated = (row.last_consolidated as number) + count;
+
+    database
+      .query(
+        "UPDATE sessions SET messages = ?, last_consolidated = ?, updated_at = ? WHERE id = ?",
+      )
+      .run(JSON.stringify(trimmed), consolidated, Date.now(), sessionId);
+  })();
+
+  log.info("Consolidated messages removed", { id: sessionId, removed: count });
 }
 
 export function listSessions(): Session[] {

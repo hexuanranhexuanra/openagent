@@ -1,7 +1,7 @@
 import { resolve } from "node:path";
 import { existsSync, mkdirSync } from "node:fs";
 import { createLogger } from "../logger";
-import type { ToolHandler, ToolDefinition } from "../types";
+import type { ToolHandler } from "../types/index";
 
 const log = createLogger("evolution:skills");
 
@@ -12,10 +12,19 @@ export interface Skill {
   execute: (args: Record<string, unknown>) => Promise<string>;
 }
 
+export interface SkillMeta {
+  name: string;
+  description: string;
+}
+
 export class SkillLoader {
   private skillsDir: string;
-  private loaded = new Map<string, ToolHandler>();
   private loadGeneration = 0;
+
+  // filename → handler (for hot-reload tracking)
+  private byFile = new Map<string, ToolHandler>();
+  // skill.name → handler (for catalog + executeSkill lookup)
+  private byName = new Map<string, ToolHandler>();
 
   constructor(skillsDir?: string) {
     this.skillsDir =
@@ -25,15 +34,13 @@ export class SkillLoader {
     }
   }
 
-  async loadAll(): Promise<ToolHandler[]> {
+  async loadAll(): Promise<void> {
     this.loadGeneration++;
-    const handlers: ToolHandler[] = [];
     const glob = new Bun.Glob("**/*.skill.ts");
 
     for await (const file of glob.scan(this.skillsDir)) {
       try {
-        const handler = await this.loadOne(file);
-        if (handler) handlers.push(handler);
+        await this.loadOne(file);
       } catch (err) {
         log.error("Failed to load skill", {
           file,
@@ -42,15 +49,13 @@ export class SkillLoader {
       }
     }
 
-    log.info("Skills loaded", { count: handlers.length });
-    return handlers;
+    log.info("Skill catalog ready", { count: this.byName.size });
   }
 
   private async loadOne(filename: string): Promise<ToolHandler | null> {
     const fullPath = resolve(this.skillsDir, filename);
     if (!existsSync(fullPath)) return null;
 
-    // Bust module cache by appending unique query string
     const mod = await import(`${fullPath}?gen=${this.loadGeneration}`);
     const skill: Skill = mod.default;
 
@@ -62,15 +67,53 @@ export class SkillLoader {
     const handler: ToolHandler = {
       definition: {
         name: `skill_${skill.name}`,
-        description: `[Skill] ${skill.description}`,
+        description: skill.description,
         parameters: skill.parameters,
       },
       execute: skill.execute,
     };
 
-    this.loaded.set(filename, handler);
+    this.byFile.set(filename, handler);
+    this.byName.set(skill.name, handler);
     log.info("Skill loaded", { name: skill.name, file: filename });
     return handler;
+  }
+
+  /**
+   * Return lightweight skill metadata for system prompt injection.
+   * Does not include parameter schemas — those are loaded on demand.
+   */
+  getCatalog(): SkillMeta[] {
+    return [...this.byName.entries()].map(([name, handler]) => ({
+      name,
+      description: handler.definition.description,
+    }));
+  }
+
+  /**
+   * Execute a skill by name. Lazy-loads if not yet in cache.
+   */
+  async executeSkill(name: string, args: Record<string, unknown>): Promise<string> {
+    let handler = this.byName.get(name);
+
+    if (!handler) {
+      // Try to find and load the skill from disk.
+      const glob = new Bun.Glob("**/*.skill.ts");
+      for await (const file of glob.scan(this.skillsDir)) {
+        if (!this.byFile.has(file)) {
+          this.loadGeneration++;
+          await this.loadOne(file);
+        }
+      }
+      handler = this.byName.get(name);
+    }
+
+    if (!handler) {
+      const available = [...this.byName.keys()].join(", ") || "none";
+      throw new Error(`Skill not found: "${name}". Available skills: ${available}`);
+    }
+
+    return handler.execute(args);
   }
 
   /**
@@ -78,11 +121,7 @@ export class SkillLoader {
    */
   async hotReload(filename: string): Promise<ToolHandler | null> {
     this.loadGeneration++;
-    const handler = await this.loadOne(filename);
-    if (handler) {
-      this.loaded.set(filename, handler);
-    }
-    return handler;
+    return this.loadOne(filename);
   }
 
   /**
@@ -101,10 +140,6 @@ export class SkillLoader {
     await Bun.write(fullPath, sourceCode);
     log.info("Skill file created", { filename });
     return fullPath;
-  }
-
-  getLoaded(): ToolHandler[] {
-    return [...this.loaded.values()];
   }
 
   listSkillFiles(): string[] {

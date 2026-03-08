@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { nanoid } from "nanoid";
 import { listSessions, resetSession } from "../sessions/manager";
 import { getAllToolDefinitions } from "../agent/tools/registry";
-import { runAgent } from "../agent";
+import { runAgent, cancelAgent, getAgentEngine } from "../agent";
 import { enqueueMessage } from "../queue";
 import { createFeishuRoutes } from "../channels/feishu";
 import { auditLog } from "../audit";
@@ -25,12 +25,41 @@ export function createApiRoutes(): Hono {
   });
 
   api.get("/status", (c) => {
+    const engine = getAgentEngine();
     return c.json({
       version: "0.2.0",
       runtime: "bun",
       pid: process.pid,
       memoryMB: Math.round(process.memoryUsage.rss() / 1024 / 1024),
+      activeSessions: engine.getActiveSessions(),
     });
+  });
+
+  // ─── Agent Task Monitoring ───
+
+  api.get("/agent/tasks", (c) => {
+    const engine = getAgentEngine();
+    const sessions = listSessions();
+    return c.json({
+      activeSessions: engine.getActiveSessions(),
+      sessions: sessions.map((s) => {
+        const info = engine.getTaskInfo(s.channel, s.peerId);
+        return {
+          sessionId: s.id,
+          channel: s.channel,
+          peerId: s.peerId,
+          messageCount: s.messages.length,
+          task: info ?? { status: "idle" },
+        };
+      }),
+    });
+  });
+
+  api.delete("/agent/tasks/:channel/:peerId", (c) => {
+    const channel = c.req.param("channel");
+    const peerId = c.req.param("peerId");
+    const cancelled = cancelAgent(channel, peerId);
+    return c.json({ cancelled, channel, peerId });
   });
 
   // ─── Session Management ───
@@ -226,6 +255,20 @@ export function createApiRoutes(): Hono {
     return c.json({ file, content });
   });
 
+  api.put("/memory/:file", async (c) => {
+    const file = c.req.param("file").toUpperCase() as "SOUL" | "USER" | "WORLD";
+    if (!["SOUL", "USER", "WORLD"].includes(file)) {
+      return c.json({ error: "Invalid memory file. Use: SOUL, USER, WORLD" }, 400);
+    }
+    const body = await c.req.json().catch(() => null);
+    if (!body || typeof body.content !== "string") {
+      return c.json({ error: "Request body must be { content: string }" }, 400);
+    }
+    const memory = getMemoryStore();
+    await memory.write(file, body.content);
+    return c.json({ file, updated: true });
+  });
+
   api.get("/memory", async (c) => {
     const memory = getMemoryStore();
     const all = await memory.readAll();
@@ -238,10 +281,7 @@ export function createApiRoutes(): Hono {
     const loader = getSkillLoader();
     return c.json({
       files: loader.listSkillFiles(),
-      loaded: loader.getLoaded().map((h) => ({
-        name: h.definition.name,
-        description: h.definition.description,
-      })),
+      loaded: loader.getCatalog(),
     });
   });
 

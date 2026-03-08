@@ -122,6 +122,45 @@ export const memoryReadTool: ToolHandler = {
 };
 
 /**
+ * Execute a skill by name (lazy-loaded on demand).
+ * The agent discovers available skills from the <skills> block in the system prompt.
+ */
+export const skillUseTool: ToolHandler = {
+  definition: {
+    name: "skill_use",
+    description:
+      "Execute a named skill. Check the <skills> section of your context for available skill names and what they do. " +
+      "Pass the skill name (without 'skill_' prefix) and any arguments it needs.",
+    parameters: {
+      type: "object",
+      properties: {
+        name: {
+          type: "string",
+          description: "The skill name, e.g. 'web-scraper' (not 'skill_web-scraper')",
+        },
+        args: {
+          type: "object",
+          description: "Arguments to pass to the skill",
+          additionalProperties: true,
+        },
+      },
+      required: ["name"],
+    },
+  },
+
+  async execute(args) {
+    const name = args.name as string;
+    const skillArgs = (args.args ?? {}) as Record<string, unknown>;
+    try {
+      const loader = getSkillLoader();
+      return await loader.executeSkill(name, skillArgs);
+    } catch (err) {
+      return JSON.stringify({ error: err instanceof Error ? err.message : String(err) });
+    }
+  },
+};
+
+/**
  * Create a new dynamic skill script.
  */
 export const skillCreateTool: ToolHandler = {
@@ -130,7 +169,7 @@ export const skillCreateTool: ToolHandler = {
     description:
       "Create a new dynamic skill script in user-space/skills/. " +
       "The script must export a default object with { name, description, parameters, execute }. " +
-      "Filename should end with .skill.ts.",
+      "Filename should end with .skill.ts. After creation the skill is immediately available via skill_use.",
     parameters: {
       type: "object",
       properties: {
@@ -154,30 +193,23 @@ export const skillCreateTool: ToolHandler = {
     try {
       const loader = getSkillLoader();
       const path = await loader.createSkill(filename, source);
-      const handler = await loader.hotReload(
-        filename.endsWith(".skill.ts") ? filename : `${filename}.skill.ts`,
-      );
-
-      return JSON.stringify({
-        created: path,
-        loaded: !!handler,
-        toolName: handler?.definition.name ?? null,
-      });
+      // Hot-reload so it appears in the catalog immediately.
+      const normalised = filename.endsWith(".skill.ts") ? filename : `${filename}.skill.ts`;
+      await loader.hotReload(normalised);
+      return JSON.stringify({ created: path });
     } catch (err) {
-      return JSON.stringify({
-        error: err instanceof Error ? err.message : String(err),
-      });
+      return JSON.stringify({ error: err instanceof Error ? err.message : String(err) });
     }
   },
 };
 
 /**
- * List and reload dynamic skills.
+ * List available skills from the catalog.
  */
 export const skillListTool: ToolHandler = {
   definition: {
     name: "skill_list",
-    description: "List all available dynamic skill scripts.",
+    description: "List all available skills with their names and descriptions.",
     parameters: {
       type: "object",
       properties: {},
@@ -187,9 +219,8 @@ export const skillListTool: ToolHandler = {
 
   async execute() {
     const loader = getSkillLoader();
-    const files = loader.listSkillFiles();
-    const loaded = loader.getLoaded().map((h) => h.definition.name);
-    return JSON.stringify({ files, loaded });
+    const catalog = loader.getCatalog();
+    return JSON.stringify({ skills: catalog });
   },
 };
 
