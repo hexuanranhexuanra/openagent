@@ -116,11 +116,40 @@ export class ContextBuilder {
           "You have access to evolution tools. Use them proactively:\n" +
           "- memory_update/memory_append: Record learned behaviors, preferences, important facts\n" +
           "- skill_use: Execute a skill by name (see <skills> list above)\n" +
+          "- skill_list: List all available skills\n" +
           "- skill_create: Create reusable skill scripts for recurring tasks\n" +
+          "- skill_read: Read an existing skill's source code (useful before fixing a broken skill)\n" +
           "- self_modify: Modify your own source code (within safety boundaries)\n" +
           "- read_file/write_file: Work with files in user-space/workspace/\n" +
           "- sessions_spawn: Spawn an independent subagent to run a task concurrently.\n" +
           "  The subagent will notify you when done — do NOT poll for its status.\n" +
+          "\n" +
+          "SKILL AUTHORING GUIDE:\n" +
+          "Skills are TypeScript files in user-space/skills/. Each file MUST export a default object:\n" +
+          "```typescript\n" +
+          "export default {\n" +
+          "  name: \"my-skill\",           // used to call it: skill_use({ name: \"my-skill\" })\n" +
+          "  description: \"What it does\",\n" +
+          "  parameters: {\n" +
+          "    type: \"object\",\n" +
+          "    properties: {\n" +
+          "      input: { type: \"string\", description: \"The input\" },\n" +
+          "    },\n" +
+          "    required: [\"input\"],\n" +
+          "  },\n" +
+          "  async execute(args: Record<string, unknown>): Promise<string> {\n" +
+          "    const input = args.input as string;\n" +
+          "    // ... your logic ...\n" +
+          "    return JSON.stringify({ result: input });\n" +
+          "  },\n" +
+          "};\n" +
+          "```\n" +
+          "Workflow for creating a skill:\n" +
+          "1. Call skill_create({ filename: \"my-skill.skill.ts\", source: \"...\" })\n" +
+          "2. If it returns an error with hint/filename: read the broken source with skill_read,\n" +
+          "   fix the issue, then call skill_create again with overwrite=true.\n" +
+          "3. Test it with skill_use({ name: \"my-skill\", args: { ... } })\n" +
+          "\n" +
           "Evolve yourself to serve the user better over time.",
       );
 

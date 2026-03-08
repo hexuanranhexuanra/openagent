@@ -17,6 +17,7 @@ import {
   skillUseTool,
   skillCreateTool,
   skillListTool,
+  skillReadTool,
   selfModifyTool,
   subagentSpawnTool,
 } from "./tools/builtin/evolution-tools";
@@ -47,6 +48,7 @@ export async function initAgent(): Promise<void> {
   registerTool(skillUseTool);
   registerTool(skillCreateTool);
   registerTool(skillListTool);
+  registerTool(skillReadTool);
   registerTool(selfModifyTool);
   registerTool(cronTool);
   registerTool(heartbeatTool);

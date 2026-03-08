@@ -197,14 +197,36 @@ export const skillCreateTool: ToolHandler = {
     const source = args.source as string;
     const overwrite = (args.overwrite as boolean) ?? false;
 
+    const loader = getSkillLoader();
+
+    // Write the file first.
+    let writtenPath: string;
     try {
-      const loader = getSkillLoader();
-      const path = await loader.createSkill(filename, source, overwrite);
-      const normalised = filename.endsWith(".skill.ts") ? filename : `${filename}.skill.ts`;
-      await loader.hotReload(normalised);
-      return JSON.stringify({ [overwrite ? "updated" : "created"]: path });
+      writtenPath = await loader.createSkill(filename, source, overwrite);
     } catch (err) {
       return JSON.stringify({ error: err instanceof Error ? err.message : String(err) });
+    }
+
+    // Attempt to load the new skill. A TypeScript/import error here means the
+    // source is broken — report it with actionable guidance so the agent can fix it.
+    const normalised = filename.endsWith(".skill.ts") ? filename : `${filename}.skill.ts`;
+    try {
+      const handler = await loader.hotReload(normalised);
+      if (!handler) {
+        return JSON.stringify({
+          error: "Skill file was written but failed to load (invalid module structure).",
+          hint: "Ensure the file has: export default { name, description, parameters, execute }. Fix and call skill_create again with overwrite=true.",
+          filename: normalised,
+        });
+      }
+      return JSON.stringify({ [overwrite ? "updated" : "created"]: writtenPath, skill: handler.definition.name });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return JSON.stringify({
+        error: `Skill file was written but failed to load: ${msg}`,
+        hint: "Fix the TypeScript error and call skill_create again with overwrite=true. Use skill_read to see the current broken source.",
+        filename: normalised,
+      });
     }
   },
 };
@@ -227,6 +249,59 @@ export const skillListTool: ToolHandler = {
     const loader = getSkillLoader();
     const catalog = loader.getCatalog();
     return JSON.stringify({ skills: catalog });
+  },
+};
+
+/**
+ * Read the source code of an existing skill file so the agent can inspect
+ * and fix broken or incorrect skills.
+ */
+export const skillReadTool: ToolHandler = {
+  definition: {
+    name: "skill_read",
+    description:
+      "Read the source code of an existing skill file from user-space/skills/. " +
+      "Use this to inspect a skill before modifying it, or to debug a broken skill. " +
+      "After reading, fix the issue and call skill_create with overwrite=true.",
+    parameters: {
+      type: "object",
+      properties: {
+        filename: {
+          type: "string",
+          description: "Skill filename (e.g. 'my-tool.skill.ts')",
+        },
+      },
+      required: ["filename"],
+    },
+  },
+
+  async execute(args) {
+    const { resolve } = await import("node:path");
+    const { existsSync } = await import("node:fs");
+
+    let filename = args.filename as string;
+    if (!filename.endsWith(".skill.ts")) filename = `${filename}.skill.ts`;
+
+    const skillsDir = resolve(process.cwd(), "user-space", "skills");
+    const fullPath = resolve(skillsDir, filename);
+
+    // Prevent path traversal
+    if (!fullPath.startsWith(skillsDir)) {
+      return JSON.stringify({ error: "Path traversal not allowed" });
+    }
+    if (!existsSync(fullPath)) {
+      const loader = getSkillLoader();
+      const files = loader.listSkillFiles();
+      return JSON.stringify({ error: `Skill not found: ${filename}`, available: files });
+    }
+
+    const content = await Bun.file(fullPath).text();
+    const numbered = content
+      .split("\n")
+      .map((line, i) => `${String(i + 1).padStart(4)} | ${line}`)
+      .join("\n");
+
+    return `// ${filename}\n${numbered}`;
   },
 };
 

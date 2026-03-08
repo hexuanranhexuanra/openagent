@@ -250,14 +250,17 @@ export function createCli(): Command {
         console.log(`  Config:    ${chalk.green("loaded")}`);
         console.log(`  Provider:  ${chalk.yellow(config.agent.defaultProvider)}`);
 
-        const providerKey =
-          config.agent.defaultProvider === "openai"
-            ? config.providers.openai.apiKey
-            : config.providers.anthropic.apiKey;
-
-        console.log(
-          `  API Key:   ${providerKey ? chalk.green("set (" + providerKey.slice(0, 8) + "...)") : chalk.red("NOT SET")}`,
-        );
+        if (config.agent.defaultProvider === "claude-code") {
+          console.log(`  Auth:      ${chalk.green("claude CLI (local session)")}`);
+        } else {
+          const providerKey =
+            config.agent.defaultProvider === "openai"
+              ? config.providers.openai.apiKey
+              : config.providers.anthropic.apiKey;
+          console.log(
+            `  API Key:   ${providerKey ? chalk.green("set (" + providerKey.slice(0, 8) + "...)") : chalk.red("NOT SET")}`,
+          );
+        }
       } catch (err) {
         console.log(`  Config:    ${chalk.red("error")} - ${err}`);
       }
