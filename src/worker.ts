@@ -46,7 +46,7 @@ async function main() {
 
   log.info("Worker process starting", { pid: process.pid });
 
-  initAgent();
+  await initAgent();
   await initQueue();
 
   onJobStream((streamEvent: JobStreamEvent) => {

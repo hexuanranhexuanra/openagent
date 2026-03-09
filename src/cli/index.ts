@@ -28,7 +28,12 @@ export function createCli(): Command {
 
       const config = loadConfig();
       setLogLevel(opts.verbose ? "debug" : config.logging.level);
-      initAgent();
+      await initAgent();
+
+      // Start background services (must be after initAgent and startGateway
+      // so WebSocket broadcast is available)
+      const { initBackgroundServices } = await import("../background/index.js");
+      const bg = initBackgroundServices();
 
       const server = startGateway();
 
@@ -79,8 +84,14 @@ export function createCli(): Command {
       console.log(`  PID:      ${chalk.cyan(String(process.pid))}`);
       console.log("");
 
+      // Start background services after the server is bound
+      bg.cron.start();
+      bg.heartbeat.start();
+
       const shutdown = async () => {
         console.log("\n  Shutting down...");
+        bg.cron.stop();
+        bg.heartbeat.stop();
         gatewayAdapter.stop();
         mq.stop();
         await channelManager.stopAll();
@@ -101,7 +112,7 @@ export function createCli(): Command {
     .action(async (opts) => {
       const config = loadConfig();
       setLogLevel(opts.verbose ? "debug" : "warn");
-      initAgent();
+      await initAgent();
 
       const sessionId = opts.session ?? "repl";
 
@@ -179,7 +190,7 @@ export function createCli(): Command {
     .requiredOption("-m, --message <text>", "Message to send")
     .action(async (opts) => {
       loadConfig();
-      initAgent();
+      await initAgent();
 
       const stream = runAgent("cli", "cli-oneshot", opts.message);
       for await (const event of stream) {
@@ -239,14 +250,17 @@ export function createCli(): Command {
         console.log(`  Config:    ${chalk.green("loaded")}`);
         console.log(`  Provider:  ${chalk.yellow(config.agent.defaultProvider)}`);
 
-        const providerKey =
-          config.agent.defaultProvider === "openai"
-            ? config.providers.openai.apiKey
-            : config.providers.anthropic.apiKey;
-
-        console.log(
-          `  API Key:   ${providerKey ? chalk.green("set (" + providerKey.slice(0, 8) + "...)") : chalk.red("NOT SET")}`,
-        );
+        if (config.agent.defaultProvider === "claude-code") {
+          console.log(`  Auth:      ${chalk.green("claude CLI (local session)")}`);
+        } else {
+          const providerKey =
+            config.agent.defaultProvider === "openai"
+              ? config.providers.openai.apiKey
+              : config.providers.anthropic.apiKey;
+          console.log(
+            `  API Key:   ${providerKey ? chalk.green("set (" + providerKey.slice(0, 8) + "...)") : chalk.red("NOT SET")}`,
+          );
+        }
       } catch (err) {
         console.log(`  Config:    ${chalk.red("error")} - ${err}`);
       }

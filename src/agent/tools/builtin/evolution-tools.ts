@@ -2,6 +2,7 @@ import type { ToolHandler } from "../../../types";
 import { getMemoryStore } from "../../../evolution/memory";
 import { getSkillLoader } from "../../../evolution/skill-loader";
 import { getSelfModifier } from "../../../evolution/self-modify";
+import { getCurrentRunContext, spawnSubagent } from "../../subagent-registry";
 
 /**
  * Update a section in SOUL.md, USER.md, or WORLD.md.
@@ -122,15 +123,55 @@ export const memoryReadTool: ToolHandler = {
 };
 
 /**
+ * Execute a skill by name (lazy-loaded on demand).
+ * The agent discovers available skills from the <skills> block in the system prompt.
+ */
+export const skillUseTool: ToolHandler = {
+  definition: {
+    name: "skill_use",
+    description:
+      "Execute a named skill. Check the <skills> section of your context for available skill names and what they do. " +
+      "Pass the skill name (without 'skill_' prefix) and any arguments it needs.",
+    parameters: {
+      type: "object",
+      properties: {
+        name: {
+          type: "string",
+          description: "The skill name, e.g. 'web-scraper' (not 'skill_web-scraper')",
+        },
+        args: {
+          type: "object",
+          description: "Arguments to pass to the skill",
+          additionalProperties: true,
+        },
+      },
+      required: ["name"],
+    },
+  },
+
+  async execute(args) {
+    const name = args.name as string;
+    const skillArgs = (args.args ?? {}) as Record<string, unknown>;
+    try {
+      const loader = getSkillLoader();
+      return await loader.executeSkill(name, skillArgs);
+    } catch (err) {
+      return JSON.stringify({ error: err instanceof Error ? err.message : String(err) });
+    }
+  },
+};
+
+/**
  * Create a new dynamic skill script.
  */
 export const skillCreateTool: ToolHandler = {
   definition: {
     name: "skill_create",
     description:
-      "Create a new dynamic skill script in user-space/skills/. " +
+      "Create or update a dynamic skill script in user-space/skills/. " +
       "The script must export a default object with { name, description, parameters, execute }. " +
-      "Filename should end with .skill.ts.",
+      "Filename should end with .skill.ts. The skill is immediately available after creation. " +
+      "To fix or improve an existing skill, pass overwrite=true with the corrected source.",
     parameters: {
       type: "object",
       properties: {
@@ -142,6 +183,10 @@ export const skillCreateTool: ToolHandler = {
           type: "string",
           description: "Full TypeScript source code for the skill",
         },
+        overwrite: {
+          type: "boolean",
+          description: "Set to true to replace an existing skill file. Defaults to false.",
+        },
       },
       required: ["filename", "source"],
     },
@@ -150,34 +195,49 @@ export const skillCreateTool: ToolHandler = {
   async execute(args) {
     const filename = args.filename as string;
     const source = args.source as string;
+    const overwrite = (args.overwrite as boolean) ?? false;
 
+    const loader = getSkillLoader();
+
+    // Write the file first.
+    let writtenPath: string;
     try {
-      const loader = getSkillLoader();
-      const path = await loader.createSkill(filename, source);
-      const handler = await loader.hotReload(
-        filename.endsWith(".skill.ts") ? filename : `${filename}.skill.ts`,
-      );
-
-      return JSON.stringify({
-        created: path,
-        loaded: !!handler,
-        toolName: handler?.definition.name ?? null,
-      });
+      writtenPath = await loader.createSkill(filename, source, overwrite);
     } catch (err) {
+      return JSON.stringify({ error: err instanceof Error ? err.message : String(err) });
+    }
+
+    // Attempt to load the new skill. A TypeScript/import error here means the
+    // source is broken — report it with actionable guidance so the agent can fix it.
+    const normalised = filename.endsWith(".skill.ts") ? filename : `${filename}.skill.ts`;
+    try {
+      const handler = await loader.hotReload(normalised);
+      if (!handler) {
+        return JSON.stringify({
+          error: "Skill file was written but failed to load (invalid module structure).",
+          hint: "Ensure the file has: export default { name, description, parameters, execute }. Fix and call skill_create again with overwrite=true.",
+          filename: normalised,
+        });
+      }
+      return JSON.stringify({ [overwrite ? "updated" : "created"]: writtenPath, skill: handler.definition.name });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
       return JSON.stringify({
-        error: err instanceof Error ? err.message : String(err),
+        error: `Skill file was written but failed to load: ${msg}`,
+        hint: "Fix the TypeScript error and call skill_create again with overwrite=true. Use skill_read to see the current broken source.",
+        filename: normalised,
       });
     }
   },
 };
 
 /**
- * List and reload dynamic skills.
+ * List available skills from the catalog.
  */
 export const skillListTool: ToolHandler = {
   definition: {
     name: "skill_list",
-    description: "List all available dynamic skill scripts.",
+    description: "List all available skills with their names and descriptions.",
     parameters: {
       type: "object",
       properties: {},
@@ -187,9 +247,118 @@ export const skillListTool: ToolHandler = {
 
   async execute() {
     const loader = getSkillLoader();
-    const files = loader.listSkillFiles();
-    const loaded = loader.getLoaded().map((h) => h.definition.name);
-    return JSON.stringify({ files, loaded });
+    const catalog = loader.getCatalog();
+    return JSON.stringify({ skills: catalog });
+  },
+};
+
+/**
+ * Read the source code of an existing skill file so the agent can inspect
+ * and fix broken or incorrect skills.
+ */
+export const skillReadTool: ToolHandler = {
+  definition: {
+    name: "skill_read",
+    description:
+      "Read the source code of an existing skill file from user-space/skills/. " +
+      "Use this to inspect a skill before modifying it, or to debug a broken skill. " +
+      "After reading, fix the issue and call skill_create with overwrite=true.",
+    parameters: {
+      type: "object",
+      properties: {
+        filename: {
+          type: "string",
+          description: "Skill filename (e.g. 'my-tool.skill.ts')",
+        },
+      },
+      required: ["filename"],
+    },
+  },
+
+  async execute(args) {
+    const { resolve } = await import("node:path");
+    const { existsSync } = await import("node:fs");
+
+    let filename = args.filename as string;
+    if (!filename.endsWith(".skill.ts")) filename = `${filename}.skill.ts`;
+
+    const skillsDir = resolve(process.cwd(), "user-space", "skills");
+    const fullPath = resolve(skillsDir, filename);
+
+    // Prevent path traversal
+    if (!fullPath.startsWith(skillsDir)) {
+      return JSON.stringify({ error: "Path traversal not allowed" });
+    }
+    if (!existsSync(fullPath)) {
+      const loader = getSkillLoader();
+      const files = loader.listSkillFiles();
+      return JSON.stringify({ error: `Skill not found: ${filename}`, available: files });
+    }
+
+    const content = await Bun.file(fullPath).text();
+    const numbered = content
+      .split("\n")
+      .map((line, i) => `${String(i + 1).padStart(4)} | ${line}`)
+      .join("\n");
+
+    return `// ${filename}\n${numbered}`;
+  },
+};
+
+/**
+ * Spawn an independent subagent to work on a task concurrently.
+ * The subagent runs in the background and delivers its result back to the
+ * parent session as a new user message when done.
+ */
+export const subagentSpawnTool: ToolHandler = {
+  definition: {
+    name: "sessions_spawn",
+    description:
+      "Spawn an independent subagent to work on a task concurrently in the background. " +
+      "The subagent runs independently and will deliver its result back to you as a user " +
+      "message when done. Do NOT poll for status — you will be notified automatically. " +
+      "Use this to parallelise independent sub-tasks (e.g. research multiple topics at once).",
+    parameters: {
+      type: "object",
+      properties: {
+        task: {
+          type: "string",
+          description: "Full task description for the subagent. Be explicit and self-contained.",
+        },
+        label: {
+          type: "string",
+          description: "Short label identifying this subagent (e.g. 'research-topic-a')",
+        },
+        timeout_seconds: {
+          type: "number",
+          description: "Max seconds to allow the subagent to run (default: 300)",
+        },
+      },
+      required: ["task"],
+    },
+  },
+
+  async execute(args) {
+    const task = args.task as string;
+    const label = (args.label as string | undefined) ?? task.slice(0, 50);
+    const timeoutMs =
+      typeof args.timeout_seconds === "number" ? args.timeout_seconds * 1000 : 300_000;
+
+    const ctx = getCurrentRunContext();
+    if (!ctx) {
+      return JSON.stringify({ error: "No run context available — cannot spawn subagent." });
+    }
+
+    const outcome = spawnSubagent({
+      task,
+      label,
+      parentChannel: ctx.channel,
+      parentPeerId: ctx.peerId,
+      parentDepth: ctx.depth,
+      timeoutMs,
+    });
+
+    return JSON.stringify(outcome);
   },
 };
 

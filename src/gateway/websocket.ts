@@ -1,7 +1,8 @@
 import type { ServerWebSocket } from "bun";
 import { nanoid } from "nanoid";
 import { createLogger } from "../logger";
-import { runAgent, type AgentStreamEvent } from "../agent";
+import { runAgent, cancelAgent, getAgentEngine } from "../agent";
+import type { AgentStreamEvent } from "../agent";
 
 const log = createLogger("gateway:ws");
 
@@ -12,13 +13,20 @@ interface WSClientData {
 
 const clients = new Map<string, ServerWebSocket<WSClientData>>();
 
+// Per-session message queue: buffer incoming messages while an agent task is running.
+const sessionQueue = new Map<
+  string,
+  Array<{ id: string; content: string; ws: ServerWebSocket<WSClientData> }>
+>();
+
 export function handleWsOpen(ws: ServerWebSocket<WSClientData>): void {
   const clientId = nanoid(12);
-  // Merge into existing ws.data rather than replacing it — Hono stores its
-  // internal event handlers in ws.data.events and the safeWebsocket guard
-  // in server.ts checks for that key. Overwriting would drop `events` and
-  // cause every subsequent message to be rejected with code 1008.
-  Object.assign(ws.data as unknown as Record<string, unknown>, { id: clientId, peerId: `webchat:${clientId}` });
+  // Merge into existing ws.data — Hono stores its internal event handlers in ws.data.events.
+  // Overwriting would drop `events` and cause every subsequent message to be rejected.
+  Object.assign(ws.data as unknown as Record<string, unknown>, {
+    id: clientId,
+    peerId: `webchat:${clientId}`,
+  });
   clients.set(clientId, ws);
   log.info("WebSocket connected", { clientId });
 
@@ -67,23 +75,37 @@ async function handleRequest(
         return;
       }
 
-      ws.send(JSON.stringify({ type: "res", id, ok: true, payload: { status: "streaming" } }));
+      const [channel, ...rest] = ws.data.peerId.split(":");
+      const peerId = rest.join(":");
+      const sessionKey = ws.data.peerId;
 
-      const peerId = ws.data.peerId;
-      try {
-        const stream = runAgent("webchat", peerId, content);
-        for await (const event of stream) {
-          sendStreamEvent(ws, event);
-        }
-      } catch (err) {
-        const errMsg = err instanceof Error ? err.message : String(err);
-        log.error("Agent error in WS", { error: errMsg });
+      if (getAgentEngine().isRunning(channel, peerId)) {
+        const queue = sessionQueue.get(sessionKey) ?? [];
+        queue.push({ id, content, ws });
+        sessionQueue.set(sessionKey, queue);
         ws.send(JSON.stringify({
-          type: "event",
-          event: "agent_error",
-          payload: { error: errMsg },
+          type: "res",
+          id,
+          ok: true,
+          payload: { status: "queued", position: queue.length },
         }));
+        return;
       }
+
+      runChatSession(channel, peerId, sessionKey, id, content, ws);
+      break;
+    }
+
+    case "cancel": {
+      const [channel, ...rest] = ws.data.peerId.split(":");
+      const peerId = rest.join(":");
+      const cancelled = cancelAgent(channel, peerId);
+      ws.send(JSON.stringify({
+        type: "res",
+        id,
+        ok: true,
+        payload: { cancelled },
+      }));
       break;
     }
 
@@ -96,6 +118,7 @@ async function handleRequest(
           uptime: process.uptime(),
           memoryMB: Math.round(process.memoryUsage.rss() / 1024 / 1024),
           clients: clients.size,
+          activeSessions: getAgentEngine().getActiveSessions(),
         },
       }));
       break;
@@ -103,7 +126,7 @@ async function handleRequest(
 
     case "reset": {
       const { resetSession } = await import("../sessions/manager");
-      resetSession(`webchat:${ws.data.peerId}`);
+      resetSession(ws.data.peerId);
       ws.send(JSON.stringify({ type: "res", id, ok: true, payload: { reset: true } }));
       break;
     }
@@ -111,6 +134,41 @@ async function handleRequest(
     default:
       ws.send(JSON.stringify({ type: "res", id, ok: false, error: `Unknown method: ${method}` }));
   }
+}
+
+function runChatSession(
+  channel: string,
+  peerId: string,
+  sessionKey: string,
+  id: string,
+  content: string,
+  ws: ServerWebSocket<WSClientData>,
+): void {
+  ws.send(JSON.stringify({ type: "res", id, ok: true, payload: { status: "streaming" } }));
+
+  (async () => {
+    try {
+      const stream = runAgent(channel, peerId, content);
+      for await (const event of stream) {
+        sendStreamEvent(ws, event);
+      }
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      log.error("Agent error in WS", { error: errMsg });
+      ws.send(JSON.stringify({
+        type: "event",
+        event: "agent_error",
+        payload: { error: errMsg },
+      }));
+    } finally {
+      const queue = sessionQueue.get(sessionKey);
+      if (queue?.length) {
+        const next = queue.shift()!;
+        if (queue.length === 0) sessionQueue.delete(sessionKey);
+        runChatSession(channel, peerId, sessionKey, next.id, next.content, next.ws);
+      }
+    }
+  })();
 }
 
 function sendStreamEvent(ws: ServerWebSocket<WSClientData>, event: AgentStreamEvent): void {
@@ -124,6 +182,9 @@ function sendStreamEvent(ws: ServerWebSocket<WSClientData>, event: AgentStreamEv
 export function handleWsClose(ws: ServerWebSocket<WSClientData>): void {
   if (ws.data?.id) {
     clients.delete(ws.data.id);
+    // Clear buffered messages — the client is gone.
+    // The active agent task (if any) cleans itself up via AgentEngine's abort.
+    sessionQueue.delete(ws.data.peerId);
     log.info("WebSocket disconnected", { clientId: ws.data.id });
   }
 }

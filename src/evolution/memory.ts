@@ -6,6 +6,7 @@ const log = createLogger("evolution:memory");
 
 const MEMORY_FILES = ["SOUL", "USER", "WORLD"] as const;
 type MemoryFile = (typeof MEMORY_FILES)[number];
+type AnyMemoryFile = MemoryFile | "MEMORY" | "HISTORY";
 
 export class MemoryStore {
   private basePath: string;
@@ -18,7 +19,7 @@ export class MemoryStore {
     }
   }
 
-  private filePath(file: MemoryFile): string {
+  private filePath(file: AnyMemoryFile): string {
     return resolve(this.basePath, `${file}.md`);
   }
 
@@ -26,6 +27,18 @@ export class MemoryStore {
     const path = this.filePath(file);
     if (!existsSync(path)) return "";
     return Bun.file(path).text();
+  }
+
+  /**
+   * Overwrite one of the SOUL / USER / WORLD files entirely.
+   */
+  async write(file: MemoryFile, content: string): Promise<void> {
+    if (!MEMORY_FILES.includes(file)) {
+      throw new Error(`Invalid memory file: ${file}`);
+    }
+    const path = this.filePath(file);
+    await Bun.write(path, content);
+    log.info("Memory file written", { file });
   }
 
   async readAll(): Promise<{ soul: string; user: string; world: string }> {
@@ -36,6 +49,43 @@ export class MemoryStore {
     ]);
     return { soul, user, world };
   }
+
+  // ── Long-term factual memory (MEMORY.md) ──────────────────────────────────
+
+  /**
+   * Read the consolidated long-term memory (MEMORY.md).
+   */
+  async readLongTerm(): Promise<string> {
+    const path = this.filePath("MEMORY");
+    if (!existsSync(path)) return "";
+    return Bun.file(path).text();
+  }
+
+  /**
+   * Overwrite MEMORY.md with updated consolidated facts.
+   */
+  async writeLongTerm(content: string): Promise<void> {
+    const path = this.filePath("MEMORY");
+    await Bun.write(path, content.trim() + "\n");
+    log.info("Long-term memory updated");
+  }
+
+  // ── History log (HISTORY.md) ───────────────────────────────────────────────
+
+  /**
+   * Append a timestamped summary paragraph to HISTORY.md.
+   * HISTORY.md is append-only — entries are never removed.
+   */
+  async appendHistory(summary: string): Promise<void> {
+    const path = this.filePath("HISTORY");
+    const timestamp = new Date().toISOString().slice(0, 19).replace("T", " ");
+    const entry = `\n---\n[${timestamp}]\n${summary.trim()}\n`;
+    const existing = existsSync(path) ? await Bun.file(path).text() : "";
+    await Bun.write(path, existing + entry);
+    log.info("History entry appended");
+  }
+
+  // ── Section-based memory (SOUL / USER / WORLD) ────────────────────────────
 
   /**
    * Replace a markdown section (## heading) with new content.

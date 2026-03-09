@@ -8,7 +8,7 @@ export const configSchema = z.object({
   }).default({}),
 
   agent: z.object({
-    defaultProvider: z.enum(["openai", "anthropic"]).default("openai"),
+    defaultProvider: z.enum(["openai", "anthropic", "claude-code"]).default("openai"),
     systemPrompt: z.string().default(
       "You are OpenAgent, a self-evolving personal AI assistant. " +
       "You can use tools to help the user, remember things across sessions, " +
@@ -17,6 +17,9 @@ export const configSchema = z.object({
     ),
     maxHistoryMessages: z.number().default(50),
     maxToolRounds: z.number().default(10),
+    // Estimated token capacity of the active model's context window.
+    // Compaction fires when the session exceeds 65% of this budget.
+    contextWindow: z.number().default(128_000),
   }).default({}),
 
   providers: z.object({
@@ -29,7 +32,12 @@ export const configSchema = z.object({
     }).default({}),
     anthropic: z.object({
       apiKey: z.string().default(""),
-      model: z.string().default("claude-sonnet-4-20250514"),
+      model: z.string().default("claude-opus-4-6"),
+      /**
+       * OAuth token from `claude setup-token`. When set, takes precedence over
+       * apiKey and uses Bearer auth (Claude subscription billing, not API key).
+       */
+      setupToken: z.string().optional(),
     }).default({}),
   }).default({}),
 
