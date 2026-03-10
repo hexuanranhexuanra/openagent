@@ -47,6 +47,7 @@ export class FeishuChannel implements Channel {
   private wsClient: Lark.WSClient | null = null;
   private larkClient: Lark.Client | null = null;
   private handler: ((msg: IncomingMessage) => Promise<void>) | null = null;
+  private _started = false;
 
   constructor(config: FeishuChannelConfig) {
     this.config = config;
@@ -57,6 +58,8 @@ export class FeishuChannel implements Channel {
   }
 
   async start(): Promise<void> {
+    if (this._started) return;
+
     const { appId, appSecret } = this.config;
     const larkDomain = this.config.domain === "lark" ? Lark.Domain.Lark : Lark.Domain.Feishu;
 
@@ -65,6 +68,21 @@ export class FeishuChannel implements Channel {
       appSecret,
       appType: Lark.AppType.SelfBuild,
       domain: larkDomain,
+    });
+
+    // Validate credentials before attempting WebSocket connection (like openclaw's probeFeishu)
+    const probeResult = await this.probeCredentials();
+    if (!probeResult.ok) {
+      log.error("Feishu credential validation failed — WebSocket will NOT connect", {
+        appId: appId.slice(0, 8) + "...",
+        error: probeResult.error,
+      });
+      throw new Error(`Feishu credential validation failed: ${probeResult.error}`);
+    }
+    log.info("Feishu credentials validated", {
+      appId: appId.slice(0, 8) + "...",
+      botName: probeResult.botName,
+      botOpenId: probeResult.botOpenId,
     });
 
     const eventDispatcher = new Lark.EventDispatcher({});
@@ -95,8 +113,57 @@ export class FeishuChannel implements Channel {
       loggerLevel: Lark.LoggerLevel.info,
     });
 
-    this.wsClient.start({ eventDispatcher });
+    try {
+      this.wsClient.start({ eventDispatcher });
+    } catch (err) {
+      log.error("Feishu WebSocket start() threw", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      throw err;
+    }
+
+    this._started = true;
     log.info("FeishuChannel started (WS mode)", { appId: appId.slice(0, 8) + "..." });
+  }
+
+  /**
+   * Validate appId/appSecret by calling the Feishu bot info API.
+   * Equivalent to openclaw's probeFeishu().
+   */
+  private async probeCredentials(): Promise<{
+    ok: boolean;
+    error?: string;
+    botName?: string;
+    botOpenId?: string;
+  }> {
+    if (!this.larkClient) {
+      return { ok: false, error: "Lark client not initialized" };
+    }
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const response = await (this.larkClient as any).request({
+        method: "GET",
+        url: "/open-apis/bot/v3/info",
+        data: {},
+      });
+      if (response.code !== 0) {
+        return {
+          ok: false,
+          error: `API error: ${response.msg || `code ${response.code}`}`,
+        };
+      }
+      const bot = response.bot || response.data?.bot;
+      return {
+        ok: true,
+        botName: bot?.bot_name,
+        botOpenId: bot?.open_id,
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
   }
 
   async stop(): Promise<void> {

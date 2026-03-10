@@ -33,15 +33,6 @@ export async function reflectOnConversation(
 
     await memory.appendEntry("USER", "## Interaction History Summary", summary);
 
-    // Detect language preference from user messages
-    const lastUserMsg = userMessages[userMessages.length - 1];
-    if (lastUserMsg) {
-      const hasChineseChars = /[\u4e00-\u9fff]/.test(lastUserMsg.content);
-      if (hasChineseChars) {
-        // Already default, but could be used for dynamic switching
-      }
-    }
-
     log.debug("Reflection completed", { channel, peerId, messageCount: messages.length });
   } catch (err) {
     log.warn("Reflection failed (non-fatal)", {

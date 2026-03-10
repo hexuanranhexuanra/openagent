@@ -146,8 +146,8 @@ export class MemoryStore {
       const afterHeader = idx + sectionHeader.length;
       const rest = text.slice(afterHeader);
 
-      // Find the next section or end of file
-      const nextSection = rest.search(/\n## /);
+      // Find the next section (any header level) or end of file
+      const nextSection = rest.search(/\n#+\s/);
       const insertAt =
         nextSection === -1
           ? text.length

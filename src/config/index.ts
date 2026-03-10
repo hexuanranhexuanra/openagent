@@ -48,11 +48,13 @@ function mergeEnvOverrides(base: Record<string, unknown>): Record<string, unknow
 
   if (!merged.channels) merged.channels = {} as Record<string, Record<string, unknown>>;
   if (!merged.channels.feishu) merged.channels.feishu = {};
-  if (env.LARK_APP_ID) merged.channels.feishu.appId = env.LARK_APP_ID;
-  if (env.LARK_APP_SECRET) merged.channels.feishu.appSecret = env.LARK_APP_SECRET;
-  if (env.LARK_ENCRYPT_KEY) merged.channels.feishu.encryptKey = env.LARK_ENCRYPT_KEY;
-  if (env.LARK_VERIFICATION_TOKEN) merged.channels.feishu.verificationToken = env.LARK_VERIFICATION_TOKEN;
-  if (env.LARK_APP_ID && env.LARK_APP_SECRET) merged.channels.feishu.enabled = true;
+  // Env vars are fallbacks for Feishu — openagent.json values take priority
+  // (the .env file may be shared with other projects using different Feishu apps)
+  if (!merged.channels.feishu.appId && env.LARK_APP_ID) merged.channels.feishu.appId = env.LARK_APP_ID;
+  if (!merged.channels.feishu.appSecret && env.LARK_APP_SECRET) merged.channels.feishu.appSecret = env.LARK_APP_SECRET;
+  if (!merged.channels.feishu.encryptKey && env.LARK_ENCRYPT_KEY) merged.channels.feishu.encryptKey = env.LARK_ENCRYPT_KEY;
+  if (!merged.channels.feishu.verificationToken && env.LARK_VERIFICATION_TOKEN) merged.channels.feishu.verificationToken = env.LARK_VERIFICATION_TOKEN;
+  if (merged.channels.feishu.appId && merged.channels.feishu.appSecret) merged.channels.feishu.enabled = true;
 
   if (!merged.logging) merged.logging = {};
   if (env.LOG_LEVEL) (merged.logging as Record<string, unknown>).level = env.LOG_LEVEL;
@@ -73,6 +75,16 @@ export function loadConfig(configPath?: string): AppConfig {
 export function getConfig(): AppConfig {
   if (!_config) return loadConfig();
   return _config;
+}
+
+/**
+ * Re-read openagent.json from disk and replace the in-memory config.
+ * Call this after programmatically writing to openagent.json so that
+ * getConfig() immediately reflects the new values in the same process.
+ */
+export function reloadConfig(): AppConfig {
+  _config = null;
+  return loadConfig();
 }
 
 export type { AppConfig } from "./schema";

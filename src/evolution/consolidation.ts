@@ -25,7 +25,7 @@ export function estimateTokens(messages: ChatMessage[]): number {
   const chars = messages.reduce((sum, m) => {
     const contentChars = typeof m.content === "string" ? m.content.length : 0;
     const toolChars = (m.toolCalls ?? []).reduce(
-      (s, tc) => s + tc.function.arguments.length,
+      (s, tc) => s + tc.function.name.length + tc.function.arguments.length,
       0,
     );
     return sum + contentChars + toolChars;
@@ -146,8 +146,12 @@ async function callSummarise(
   provider: LLMProvider,
 ): Promise<{ summary: string; memory_update: string }> {
   const conversationText = messages
-    .filter((m) => m.role === "user" || m.role === "assistant")
-    .map((m) => `[${m.role}]: ${(m.content ?? "").slice(0, 800)}`)
+    .filter((m) => m.role === "user" || m.role === "assistant" || m.role === "tool")
+    .map((m) => {
+      const label =
+        m.role === "tool" ? `[tool_result:${m.toolCallId ?? "?"}]` : `[${m.role}]`;
+      return `${label}: ${(m.content ?? "").slice(0, 500)}`;
+    })
     .join("\n");
 
   const prompt = buildPrompt(conversationText, currentMemory);

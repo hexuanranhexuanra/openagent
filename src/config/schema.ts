@@ -20,6 +20,10 @@ export const configSchema = z.object({
     // Estimated token capacity of the active model's context window.
     // Compaction fires when the session exceeds 65% of this budget.
     contextWindow: z.number().default(128_000),
+    /** Max chars per bootstrap file (SOUL.md, USER.md, etc.) before truncation. */
+    bootstrapMaxChars: z.number().default(8_000),
+    /** Max total chars across all bootstrap files. */
+    bootstrapTotalMaxChars: z.number().default(40_000),
   }).default({}),
 
   providers: z.object({

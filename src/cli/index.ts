@@ -38,11 +38,12 @@ export function createCli(): Command {
       const server = startGateway();
 
       // ─── Channel Adapter setup ───
-      const { ChannelManager } = await import("../channels/manager.js");
+      const { ChannelManager, setChannelManager } = await import("../channels/manager.js");
       const { getMessageQueue } = await import("../channels/message-queue.js");
       const { getGatewayAdapter } = await import("../channels/gateway-adapter.js");
 
       const channelManager = new ChannelManager();
+      setChannelManager(channelManager);
       const mq = getMessageQueue();
       const gatewayAdapter = getGatewayAdapter();
 
@@ -55,13 +56,23 @@ export function createCli(): Command {
       const feishuAppId = config.channels.feishu.appId || process.env.LARK_APP_ID;
       const feishuAppSecret = config.channels.feishu.appSecret || process.env.LARK_APP_SECRET;
       let feishuConnected = false;
+      let feishuError: string | undefined;
       if (feishuAppId && feishuAppSecret) {
         const { FeishuChannel } = await import("../channels/feishu-ws.js");
         const feishuChannel = new FeishuChannel({ appId: feishuAppId, appSecret: feishuAppSecret });
         channelManager.register(feishuChannel);
-        feishuConnected = true;
+
+        // Start Feishu individually so we can capture its specific error
+        try {
+          await feishuChannel.start();
+          feishuConnected = true;
+        } catch (err) {
+          feishuError = err instanceof Error ? err.message : String(err);
+          console.error(chalk.red(`  Feishu channel start failed: ${feishuError}`));
+        }
       }
 
+      // Start remaining channels (webchat, etc.)
       await channelManager.startAll();
       channelManager.startOutboundDispatch(mq);
       // Run GatewayAdapter loop in background (no await)
@@ -78,8 +89,12 @@ export function createCli(): Command {
       console.log(chalk.gray("  ─────────────────────────────────"));
       const { getProviderName } = await import("../agent/index.js");
       console.log(`  Provider: ${chalk.yellow(getProviderName())}`);
-      if (feishuConnected) {
+      if (feishuConnected && !feishuError) {
         console.log(`  Feishu:   ${chalk.green("connected")} (WebSocket)`);
+      } else if (feishuError) {
+        console.log(`  Feishu:   ${chalk.red("FAILED")} — ${feishuError}`);
+      } else if (feishuAppId || feishuAppSecret) {
+        console.log(`  Feishu:   ${chalk.yellow("incomplete credentials")}`);
       }
       console.log(`  PID:      ${chalk.cyan(String(process.pid))}`);
       console.log("");
@@ -151,11 +166,20 @@ export function createCli(): Command {
               case "text":
                 process.stdout.write(event.content ?? "");
                 break;
+              case "progress":
+                // Always show round progress so the user knows the agent is working.
+                process.stderr.write(
+                  chalk.dim(`  [${event.round}/${event.maxRounds}] thinking...\n`),
+                );
+                break;
               case "tool_start":
+                // Always show tool name; show args only in verbose mode.
                 if (opts.verbose) {
                   process.stderr.write(
-                    chalk.gray(`\n  ⚙ ${event.toolName}(${JSON.stringify(event.toolArgs).slice(0, 100)})\n`),
+                    chalk.gray(`  ⚙ ${event.toolName}(${JSON.stringify(event.toolArgs).slice(0, 120)})\n`),
                   );
+                } else {
+                  process.stderr.write(chalk.gray(`  ⚙ ${event.toolName}\n`));
                 }
                 break;
               case "tool_result":
@@ -165,7 +189,7 @@ export function createCli(): Command {
                 }
                 break;
               case "error":
-                process.stderr.write(chalk.red(`\n  Error: ${event.error}\n`));
+                process.stderr.write(chalk.red(`\n  ⚠ ${event.error}\n`));
                 break;
               case "done":
                 break;

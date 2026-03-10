@@ -5,6 +5,17 @@ import { createLogger } from "../logger";
 
 const log = createLogger("channels");
 
+let _channelManager: ChannelManager | null = null;
+
+/** Returns the running ChannelManager, or null if the gateway is not active (e.g. CLI chat mode). */
+export function getChannelManager(): ChannelManager | null {
+  return _channelManager;
+}
+
+export function setChannelManager(mgr: ChannelManager): void {
+  _channelManager = mgr;
+}
+
 export class ChannelManager {
   private channels = new Map<string, Channel>();
   private messageHandler: ((msg: IncomingMessage) => Promise<void>) | null = null;

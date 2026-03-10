@@ -6,5 +6,12 @@
     "anthropic": {
       "model": "claude-opus-4-6"
     }
+  },
+  "channels": {
+    "feishu": {
+      "enabled": true,
+      "appId": "cli_a9279ece00b8dcc2",
+      "appSecret": "FmgcsZatFCXdVOnFxNqynd2bAwxoiG4K"
+    }
   }
 }
