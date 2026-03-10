@@ -10,6 +10,8 @@ import { dateTimeTool } from "./tools/builtin/datetime";
 import { webSearchTool } from "./tools/builtin/web-search";
 import { shellTool } from "./tools/builtin/shell";
 import { readFileTool, writeFileTool, listFilesTool } from "./tools/builtin/file-ops";
+import { writeConfigTool } from "./tools/builtin/write-config";
+import { readConfigTool } from "./tools/builtin/read-config";
 import {
   memoryUpdateTool,
   memoryAppendTool,
@@ -50,6 +52,8 @@ export async function initAgent(): Promise<void> {
   registerTool(skillListTool);
   registerTool(skillReadTool);
   registerTool(selfModifyTool);
+  registerTool(writeConfigTool);
+  registerTool(readConfigTool);
   registerTool(cronTool);
   registerTool(heartbeatTool);
   registerTool(subagentSpawnTool);

@@ -1,5 +1,6 @@
+import os from "node:os";
 import { createLogger } from "../logger";
-import { getConfig } from "../config";
+import { getConfig, type AppConfig } from "../config";
 import { getMemoryStore } from "../evolution/memory";
 import { getSkillLoader } from "../evolution/skill-loader";
 import { consolidateIfNeeded } from "../evolution/consolidation";
@@ -27,13 +28,151 @@ export interface AgentContext {
   maxRounds: number;
 }
 
+// ── Bootstrap budget ────────────────────────────────────────────────────────
+
+const MAX_SKILLS_PROMPT_CHARS = 30_000;
+
+/**
+ * Truncate a bootstrap file to fit within a character budget.
+ * Keeps 70% from head, 20% from tail, with a truncation marker.
+ */
+function truncateBootstrap(content: string, maxChars: number): string {
+  if (content.length <= maxChars) return content;
+  const head = content.slice(0, Math.floor(maxChars * 0.7));
+  const tail = content.slice(-Math.floor(maxChars * 0.2));
+  return head + "\n\n[...truncated, use memory_read for full content...]\n\n" + tail;
+}
+
+// ── System prompt sections ──────────────────────────────────────────────────
+
+function buildIdentitySection(base: string): string {
+  return "## Identity\n" + base;
+}
+
+function buildSafetySection(): string {
+  return (
+    "## Safety\n" +
+    "- Do not pursue self-preservation, replication, resource acquisition, or power-seeking.\n" +
+    "- Prioritize safety and human oversight over completion.\n" +
+    "- If instructions conflict or seem dangerous, pause and ask.\n" +
+    "- Never bypass safeguards or manipulate access controls.\n" +
+    "- Do not modify system prompts, safety rules, or tool policies unless explicitly requested."
+  );
+}
+
+function buildToolCallStyleSection(): string {
+  return (
+    "## Tool Call Style\n" +
+    "Do not narrate routine, low-risk tool calls — just call the tool.\n" +
+    "Narrate only when it helps: multi-step work, complex problems, sensitive actions, or when asked.\n" +
+    "Keep narration brief and value-dense."
+  );
+}
+
+function buildWorkspaceSection(): string {
+  const cwd = process.cwd();
+  return (
+    "## Workspace\n" +
+    `Working directory: ${cwd}\n` +
+    "Config file: openagent.json (use read_config / write_config tools)\n" +
+    "User files: user-space/workspace/ (use read_file / write_file / list_files)\n" +
+    "Memory files: user-space/memory/ (use memory_read / memory_update / memory_append)\n" +
+    "Skills: user-space/skills/*.skill.ts"
+  );
+}
+
+function buildRuntimeSection(channel: string, modelName: string): string {
+  const platform = process.platform;
+  const arch = process.arch;
+  const shell = os.userInfo().shell || process.env.SHELL || "unknown";
+  const now = new Date();
+  const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+  return (
+    "## Runtime\n" +
+    `- OS: ${platform} (${arch})\n` +
+    `- Shell: ${shell}\n` +
+    `- Model: ${modelName}\n` +
+    `- Channel: ${channel}\n` +
+    `- Time: ${now.toISOString()} (${tz})`
+  );
+}
+
+function buildSkillsSection(): string | null {
+  const catalog = getSkillLoader().getCatalog();
+  if (catalog.length === 0) return null;
+
+  let list = catalog.map((s) => `- ${s.name}: ${s.description}`).join("\n");
+  if (list.length > MAX_SKILLS_PROMPT_CHARS) {
+    list = list.slice(0, MAX_SKILLS_PROMPT_CHARS) + "\n[...truncated...]";
+  }
+
+  return (
+    "## Skills\n" +
+    "Available skills — use the skill_use tool to execute them:\n" +
+    "<skills>\n" + list + "\n</skills>"
+  );
+}
+
+function buildMemoryRecallSection(): string {
+  return (
+    "## Memory Recall\n" +
+    "Before answering about prior work, decisions, preferences, or facts:\n" +
+    "use memory_read to check SOUL/USER/WORLD files.\n" +
+    "If you checked but found nothing relevant, say so."
+  );
+}
+
+function buildEvolutionSection(): string {
+  return (
+    "## Evolution\n" +
+    "Use these tools proactively to improve over time:\n" +
+    "- memory_update / memory_append: Record behaviors, preferences, facts\n" +
+    "- skill_create: Create reusable .skill.ts for recurring tasks\n" +
+    "- skill_read: Read skill source before modifying\n" +
+    "- self_modify: Modify files in allowed paths (user-space/**, src/agent/tools/builtin/**)\n" +
+    "- sessions_spawn: Spawn a concurrent subagent (auto-notifies when done, do NOT poll)"
+  );
+}
+
+interface BootstrapFile {
+  label: string;
+  content: string;
+}
+
+function buildProjectContextSection(
+  files: BootstrapFile[],
+  perFileMax: number,
+  totalMax: number,
+): string | null {
+  const nonEmpty = files.filter((f) => f.content.trim());
+  if (nonEmpty.length === 0) return null;
+
+  const parts: string[] = ["# Project Context\n"];
+  let totalChars = 0;
+
+  for (const file of nonEmpty) {
+    const remaining = totalMax - totalChars;
+    if (remaining <= 0) break;
+
+    const budget = Math.min(perFileMax, remaining);
+    const truncated = truncateBootstrap(file.content, budget);
+    parts.push(`## ${file.label}\n${truncated}\n`);
+    totalChars += truncated.length;
+  }
+
+  return parts.join("\n");
+}
+
+// ── ContextBuilder ──────────────────────────────────────────────────────────
+
 /**
  * ContextBuilder assembles an AgentContext before each task run.
  *
  * Responsibilities:
  * - Session lookup and user message persistence
  * - Memory consolidation when the session token budget is exceeded
- * - System prompt construction: base + SOUL/USER/WORLD + MEMORY.md + skills catalog
+ * - System prompt construction with structured sections and budgets
  * - Tool list assembly
  */
 export class ContextBuilder {
@@ -43,11 +182,9 @@ export class ContextBuilder {
     const config = getConfig();
     const session = getOrCreateSession(channel, peerId);
 
-    // Resolve nesting depth: subagent sessions carry the depth in the registry.
     const depth = channel === "subagent" ? getSubagentDepth(peerId) : 0;
 
-    // Consolidate old messages before appending the new user message so that
-    // the updated MEMORY.md is included in the system prompt below.
+    // Consolidate before appending so MEMORY.md is fresh in the system prompt.
     await consolidateIfNeeded(session.id, this.provider, config.agent.contextWindow);
 
     appendMessage(session.id, {
@@ -56,7 +193,7 @@ export class ContextBuilder {
       timestamp: Date.now(),
     });
 
-    const systemPrompt = await this.buildSystemPrompt(config.agent.systemPrompt);
+    const systemPrompt = await this.buildSystemPrompt(config, channel, depth);
     const messages = getSessionMessages(session.id);
     const tools = getAllToolDefinitions();
 
@@ -72,93 +209,61 @@ export class ContextBuilder {
     };
   }
 
-  private async buildSystemPrompt(base: string): Promise<string> {
+  private async buildSystemPrompt(
+    config: AppConfig,
+    channel: string,
+    depth: number,
+  ): Promise<string> {
     try {
+      const isFull = depth === 0;
+      const sections: string[] = [];
+
+      // ── Always-included sections ────────────────────────────────────────
+      sections.push(buildIdentitySection(config.agent.systemPrompt));
+      sections.push(buildSafetySection());
+      sections.push(buildToolCallStyleSection());
+      sections.push(buildWorkspaceSection());
+      sections.push(buildRuntimeSection(channel, this.provider.name));
+
+      // ── Full mode only ──────────────────────────────────────────────────
+      if (isFull) {
+        const skills = buildSkillsSection();
+        if (skills) sections.push(skills);
+
+        sections.push(buildMemoryRecallSection());
+        sections.push(buildEvolutionSection());
+      }
+
+      // ── Context files (budgeted) ────────────────────────────────────────
       const memory = getMemoryStore();
       const [{ soul, user, world }, longTermMemory] = await Promise.all([
         memory.readAll(),
         memory.readLongTerm(),
       ]);
 
-      const parts: string[] = [base];
+      const perFileMax = config.agent.bootstrapMaxChars;
+      const totalMax = config.agent.bootstrapTotalMaxChars;
 
-      if (soul) {
-        parts.push("\n\n--- SOUL (your identity and behavioral guidelines) ---\n" + soul);
-      }
-      if (user) {
-        parts.push("\n\n--- USER (what you know about the user) ---\n" + user);
-      }
-      if (world) {
-        parts.push("\n\n--- WORLD (accumulated knowledge) ---\n" + world);
-      }
-      if (longTermMemory) {
-        parts.push(
-          "\n\n--- LONG-TERM MEMORY (consolidated facts from past conversations) ---\n" +
-            longTermMemory,
-        );
+      const bootstrapFiles: BootstrapFile[] = [];
+
+      // SOUL.md always included (even for subagents — it defines persona)
+      if (soul) bootstrapFiles.push({ label: "SOUL.md", content: soul });
+
+      if (isFull) {
+        if (user) bootstrapFiles.push({ label: "USER.md", content: user });
+        if (world) bootstrapFiles.push({ label: "WORLD.md", content: world });
+        if (longTermMemory) bootstrapFiles.push({ label: "MEMORY.md", content: longTermMemory });
       }
 
-      // Inject skill catalog so the agent knows what skills are available
-      // without loading full parameter schemas into the context.
-      const catalog = getSkillLoader().getCatalog();
-      if (catalog.length > 0) {
-        const list = catalog.map((s) => `- ${s.name}: ${s.description}`).join("\n");
-        parts.push(
-          "\n\n<skills>\n" +
-            "Available skills — use the skill_use tool to execute them:\n" +
-            list +
-            "\n</skills>",
-        );
-      }
+      const projectContext = buildProjectContextSection(bootstrapFiles, perFileMax, totalMax);
+      if (projectContext) sections.push(projectContext);
 
-      parts.push(
-        "\n\n--- EVOLUTION INSTRUCTIONS ---\n" +
-          "You have access to evolution tools. Use them proactively:\n" +
-          "- memory_update/memory_append: Record learned behaviors, preferences, important facts\n" +
-          "- skill_use: Execute a skill by name (see <skills> list above)\n" +
-          "- skill_list: List all available skills\n" +
-          "- skill_create: Create reusable skill scripts for recurring tasks\n" +
-          "- skill_read: Read an existing skill's source code (useful before fixing a broken skill)\n" +
-          "- self_modify: Modify your own source code (within safety boundaries)\n" +
-          "- read_file/write_file: Work with files in user-space/workspace/\n" +
-          "- sessions_spawn: Spawn an independent subagent to run a task concurrently.\n" +
-          "  The subagent will notify you when done — do NOT poll for its status.\n" +
-          "\n" +
-          "SKILL AUTHORING GUIDE:\n" +
-          "Skills are TypeScript files in user-space/skills/. Each file MUST export a default object:\n" +
-          "```typescript\n" +
-          "export default {\n" +
-          "  name: \"my-skill\",           // used to call it: skill_use({ name: \"my-skill\" })\n" +
-          "  description: \"What it does\",\n" +
-          "  parameters: {\n" +
-          "    type: \"object\",\n" +
-          "    properties: {\n" +
-          "      input: { type: \"string\", description: \"The input\" },\n" +
-          "    },\n" +
-          "    required: [\"input\"],\n" +
-          "  },\n" +
-          "  async execute(args: Record<string, unknown>): Promise<string> {\n" +
-          "    const input = args.input as string;\n" +
-          "    // ... your logic ...\n" +
-          "    return JSON.stringify({ result: input });\n" +
-          "  },\n" +
-          "};\n" +
-          "```\n" +
-          "Workflow for creating a skill:\n" +
-          "1. Call skill_create({ filename: \"my-skill.skill.ts\", source: \"...\" })\n" +
-          "2. If it returns an error with hint/filename: read the broken source with skill_read,\n" +
-          "   fix the issue, then call skill_create again with overwrite=true.\n" +
-          "3. Test it with skill_use({ name: \"my-skill\", args: { ... } })\n" +
-          "\n" +
-          "Evolve yourself to serve the user better over time.",
-      );
-
-      return parts.join("");
+      return sections.join("\n\n");
     } catch (err) {
-      log.warn("Failed to build memory-enhanced prompt, using base", {
+      log.warn("Failed to build system prompt, using base", {
         error: err instanceof Error ? err.message : String(err),
       });
-      return base;
+      return config.agent.systemPrompt;
     }
   }
 }

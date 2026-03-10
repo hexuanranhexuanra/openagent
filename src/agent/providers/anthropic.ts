@@ -38,13 +38,16 @@ export class AnthropicProvider implements LLMProvider {
       if (msg.role === "system") continue;
 
       if (msg.role === "tool") {
+        // Ensure content is always a string — dynamic skills may return non-strings at runtime.
+        const toolContent =
+          typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content ?? "");
         anthropicMessages.push({
           role: "user",
           content: [
             {
               type: "tool_result",
               tool_use_id: msg.toolCallId ?? "",
-              content: msg.content,
+              content: toolContent,
             },
           ],
         });
@@ -95,23 +98,23 @@ export class AnthropicProvider implements LLMProvider {
             // Accumulating tool call JSON - handled at content_block_stop
           }
         } else if (event.type === "content_block_stop") {
+          // Use event.index to only emit the block that just completed.
+          // Iterating all snapshot.content would re-emit earlier tool_use blocks
+          // on every subsequent content_block_stop, producing duplicates.
           const snapshot = stream.currentMessage;
-          if (snapshot) {
-            for (const block of snapshot.content) {
-              if (block.type === "tool_use") {
-                yield {
-                  type: "tool_call",
-                  toolCall: {
-                    id: block.id,
-                    type: "function",
-                    function: {
-                      name: block.name,
-                      arguments: JSON.stringify(block.input),
-                    },
-                  },
-                };
-              }
-            }
+          const block = snapshot?.content[event.index];
+          if (block?.type === "tool_use") {
+            yield {
+              type: "tool_call",
+              toolCall: {
+                id: block.id,
+                type: "function",
+                function: {
+                  name: block.name,
+                  arguments: JSON.stringify(block.input),
+                },
+              },
+            };
           }
         } else if (event.type === "message_stop") {
           const finalMessage = await stream.finalMessage();

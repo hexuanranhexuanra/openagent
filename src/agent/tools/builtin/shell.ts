@@ -4,7 +4,12 @@ export const shellTool: ToolHandler = {
   definition: {
     name: "run_shell",
     description:
-      "Execute a shell command on the host machine. Use with caution. Returns stdout, stderr, and exit code.",
+      "Execute a shell command on the host machine. Returns stdout, stderr, and exit code. " +
+      "Default working directory is the project root (where openagent.json lives). " +
+      "Timeout is 10 seconds by default — keep commands short. " +
+      "WARNING: Do NOT use 'find' without '-maxdepth' — it will scan the entire disk and hang. " +
+      "Do NOT start/restart the gateway server (bun run start/daemon/dev) — " +
+      "those are long-running processes. Use write_config for config changes.",
     parameters: {
       type: "object",
       properties: {
@@ -14,11 +19,12 @@ export const shellTool: ToolHandler = {
         },
         cwd: {
           type: "string",
-          description: "Working directory for the command. Defaults to home directory.",
+          description:
+            "Working directory. Defaults to the project root directory.",
         },
         timeout: {
           type: "number",
-          description: "Timeout in milliseconds. Defaults to 30000.",
+          description: "Timeout in milliseconds. Defaults to 10000.",
         },
       },
       required: ["command"],
@@ -27,8 +33,8 @@ export const shellTool: ToolHandler = {
 
   async execute(args) {
     const command = args.command as string;
-    const cwd = (args.cwd as string) || process.env.HOME || "/tmp";
-    const timeout = (args.timeout as number) || 30_000;
+    const cwd = (args.cwd as string) || process.cwd();
+    const timeout = (args.timeout as number) || 10_000;
 
     try {
       const proc = Bun.spawn(["sh", "-c", command], {

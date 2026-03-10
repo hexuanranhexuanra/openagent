@@ -98,7 +98,12 @@ export class AgentEngine {
 
       if (sessionId) {
         const msgs = getSessionMessages(sessionId);
-        reflectOnConversation(msgs, channel, peerId).catch(() => {});
+        reflectOnConversation(msgs, channel, peerId).catch((err) => {
+        log.warn("Reflection failed (non-fatal)", {
+          taskId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
       }
 
       yield { type: "done" };

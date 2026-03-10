@@ -31,6 +31,7 @@ export class StreamAgent {
       if (signal.aborted) return;
 
       round++;
+      yield { type: "progress", round, maxRounds: ctx.maxRounds };
       const messages = getSessionMessages(ctx.sessionId);
       const stream = this.provider.chat(messages, ctx.tools, ctx.systemPrompt);
 
@@ -90,7 +91,17 @@ export class StreamAgent {
         try {
           toolArgs = JSON.parse(tc.function.arguments);
         } catch {
-          toolArgs = {};
+          log.warn("Failed to parse tool arguments, skipping execution", {
+            toolName,
+            rawArgs: tc.function.arguments.slice(0, 300),
+          });
+          appendMessage(ctx.sessionId, {
+            role: "tool",
+            content: `[Error: Could not parse tool arguments as JSON. Raw: ${tc.function.arguments.slice(0, 300)}]`,
+            toolCallId: tc.id,
+            timestamp: Date.now(),
+          });
+          continue;
         }
 
         // Check for loops BEFORE executing — avoids wasting a tool call
@@ -124,6 +135,15 @@ export class StreamAgent {
 
         let result = await executeTool(toolName, toolArgs);
 
+        // Cap oversized tool results to prevent context window exhaustion
+        const MAX_TOOL_RESULT_CHARS = 24_000; // ~6k tokens
+        if (result.length > MAX_TOOL_RESULT_CHARS) {
+          log.warn("Tool result truncated", { toolName, originalLength: result.length });
+          result =
+            result.slice(0, MAX_TOOL_RESULT_CHARS) +
+            `\n\n[Result truncated: original was ${result.length} chars, kept first ${MAX_TOOL_RESULT_CHARS}]`;
+        }
+
         // Append loop warning to the tool result so the LLM self-corrects next round
         if (loopCheck.stuck && loopCheck.level === "warning") {
           log.warn("Loop detector: warning", {
@@ -147,6 +167,12 @@ export class StreamAgent {
 
     if (round >= ctx.maxRounds) {
       log.warn("Max tool rounds reached", { sessionId: ctx.sessionId, rounds: round });
+      yield {
+        type: "error",
+        error:
+          `Reached the limit of ${ctx.maxRounds} tool rounds without completing the task. ` +
+          "Send a follow-up message to continue, or ask the agent to summarise progress so far.",
+      };
     }
   }
 }

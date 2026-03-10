@@ -31,7 +31,10 @@ export async function executeTool(
   }
 
   try {
-    return await handler.execute(args);
+    const raw = await handler.execute(args);
+    // Coerce to string — dynamic skills may return non-strings at runtime despite the type.
+    if (typeof raw === "string") return raw;
+    return JSON.stringify(raw ?? "");
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     log.error("Tool execution failed", { name, error: message });
