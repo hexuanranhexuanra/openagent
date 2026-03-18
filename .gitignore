@@ -1,10 +1,22 @@
-node_modules/
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
 dist/
+build/
+
+# Node (legacy)
+node_modules/
+bun.lock
+
+# Data
 data/
 logs/
 *.db
 *.db-journal
 *.db-wal
 *.db-shm
+
+# Secrets
 .env
-bun.lock
