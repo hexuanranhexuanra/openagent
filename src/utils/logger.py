@@ -36,10 +36,7 @@ def _log(level: str, scope: str, msg: str, data: dict | None = None) -> None:
 
     line = json.dumps(entry, ensure_ascii=False)
 
-    if level in ("error", "warn"):
-        print(line, file=sys.stderr)
-    else:
-        print(line)
+    print(line, file=sys.stderr)
 
 
 class Logger:

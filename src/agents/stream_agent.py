@@ -11,7 +11,7 @@ from src.agents.loop_detector import LoopDetector
 from src.tools.registry import execute_tool
 from src.types import AgentStreamEvent, ChatMessage
 from src.utils.logger import create_logger
-from src.sessions.manager import append_message, get_session_messages
+from src.sessions.manager import append_message, get_session_messages, get_unconsolidated_messages
 
 if TYPE_CHECKING:
     from src.agents.context import AgentContext
@@ -39,7 +39,7 @@ class StreamAgent:
             round_num += 1
             yield AgentStreamEvent(type="progress", round=round_num, max_rounds=ctx.max_rounds)
 
-            messages = await get_session_messages(ctx.session_id)
+            messages = await get_unconsolidated_messages(ctx.session_id)
             stream = self._provider.chat(messages, ctx.tools, ctx.system_prompt)
 
             round_text = ""

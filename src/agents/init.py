@@ -24,8 +24,40 @@ async def init_agent() -> None:
 
     provider = _build_provider()
     _provider_name = provider.name
+    use_claude_code = _provider_name == "claude-code"
     init_context_builder(provider)
-    init_agent_engine(provider)
+    init_agent_engine(provider, use_claude_code=use_claude_code)
+
+    # Initialize consolidation manager
+    config = get_config()
+    if config.memory.enabled:
+        from src.evolution.consolidation import init_consolidation_manager
+
+        init_consolidation_manager(provider, config.memory.consolidation_window)
+        log.info("Consolidation manager initialized", {
+            "window": config.memory.consolidation_window,
+        })
+
+        # Initialize search index
+        if config.memory.search_backend in ("fts", "hybrid"):
+            embedding_provider = None
+            if config.memory.search_backend == "hybrid":
+                embedding_provider = _build_embedding_provider(config)
+            from src.evolution.search import init_hybrid_index
+
+            await init_hybrid_index(
+                db_path="data/memory_index.db",
+                embedding_provider=embedding_provider,
+            )
+            log.info("Memory search index initialized", {
+                "backend": config.memory.search_backend,
+                "has_embeddings": embedding_provider is not None,
+            })
+
+        # Run legacy migration (USER.md + WORLD.md → MEMORY.md)
+        from src.evolution.memory import get_memory_store
+
+        await get_memory_store().migrate_if_needed()
 
     await _load_skills()
 
@@ -51,24 +83,25 @@ def _register_builtin_tools() -> None:
     register_tool(write_config_tool)
 
     from src.tools.builtins.evolution_tools import (
-        memory_update_tool, memory_append_tool, memory_read_tool,
+        memory_read_tool, memory_save_tool, memory_search_tool, memory_get_tool,
         skill_use_tool, skill_create_tool, skill_list_tool, skill_read_tool,
         self_modify_tool, subagent_spawn_tool,
     )
-    from src.tools.builtins.memory_tool import memory_tool
+    from src.tools.builtins.notebook_tool import notebook_tool
     from src.tools.builtins.cron_tool import cron_tool
     from src.tools.builtins.heartbeat_tool import heartbeat_tool
 
-    register_tool(memory_update_tool)
-    register_tool(memory_append_tool)
     register_tool(memory_read_tool)
+    register_tool(memory_save_tool)
+    register_tool(memory_search_tool)
+    register_tool(memory_get_tool)
     register_tool(skill_use_tool)
     register_tool(skill_create_tool)
     register_tool(skill_list_tool)
     register_tool(skill_read_tool)
     register_tool(self_modify_tool)
     register_tool(subagent_spawn_tool)
-    register_tool(memory_tool)
+    register_tool(notebook_tool)
     register_tool(cron_tool)
     register_tool(heartbeat_tool)
 
@@ -81,6 +114,7 @@ def _build_provider() -> LLMProvider:
 
     if provider_name == "claude-code":
         from src.models.claude_code import ClaudeCodeProvider
+        # Don't pass anthropic model — let Claude Code use its own default
         return ClaudeCodeProvider()
 
     # setupToken auto-activates Anthropic regardless of defaultProvider
@@ -112,6 +146,29 @@ def _build_provider() -> LLMProvider:
 
     from src.models.openai_provider import OpenAIProvider
     return OpenAIProvider(oai.api_key, oai.model, oai.base_url, oai.query_params)
+
+
+def _build_embedding_provider(config):
+    """Build embedding provider based on config."""
+    emb_config = config.memory.embedding
+    if emb_config.provider == "none":
+        return None
+
+    if emb_config.provider == "openai":
+        from src.evolution.embeddings import OpenAIEmbeddingProvider
+
+        # Fall back to the main OpenAI provider config if embedding-specific keys not set
+        api_key = emb_config.api_key or config.providers.openai.api_key
+        base_url = emb_config.base_url or config.providers.openai.base_url or None
+        return OpenAIEmbeddingProvider(
+            api_key=api_key,
+            model=emb_config.model,
+            base_url=base_url,
+            query_params=config.providers.openai.query_params or None,
+        )
+
+    log.warn("Unknown embedding provider", {"provider": emb_config.provider})
+    return None
 
 
 async def _load_skills() -> None:

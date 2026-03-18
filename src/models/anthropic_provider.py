@@ -102,6 +102,14 @@ class AnthropicProvider:
             if ant_tools:
                 kwargs["tools"] = ant_tools
 
+            log.debug("Anthropic request", {
+                "model": self._model,
+                "message_count": len(ant_messages),
+                "tool_count": len(ant_tools) if ant_tools else 0,
+                "system_len": len(system_prompt) if system_prompt else 0,
+                "first_msg_role": ant_messages[0]["role"] if ant_messages else "none",
+            })
+
             async with self._client.messages.stream(**kwargs) as stream:
                 async for event in stream:
                     if event.type == "content_block_delta":
@@ -132,6 +140,17 @@ class AnthropicProvider:
                                 total_tokens=final.usage.input_tokens + final.usage.output_tokens,
                             ),
                         )
+        except anthropic.BadRequestError as e:
+            # Dump request details for debugging 400 errors
+            log.error("Anthropic 400 Bad Request", {
+                "error": str(e),
+                "model": self._model,
+                "message_count": len(ant_messages),
+                "tool_count": len(ant_tools) if ant_tools else 0,
+                "messages_preview": json.dumps(ant_messages[:2], ensure_ascii=False)[:500],
+                "tools_preview": json.dumps([t["name"] for t in ant_tools]) if ant_tools else "none",
+            })
+            yield StreamChunk(type="error", error=str(e))
         except Exception as e:
             log.error("Anthropic request failed", {"error": str(e)})
             yield StreamChunk(type="error", error=str(e))

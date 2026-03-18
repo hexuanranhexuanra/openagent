@@ -80,6 +80,36 @@ class AgentConfig(_CamelModel):
     bootstrap_total_max_chars: int = 40_000
 
 
+class EmbeddingConfig(_CamelModel):
+    provider: Literal["openai", "none"] = "none"
+    model: str = "text-embedding-3-small"
+    api_key: str = ""
+    base_url: str = ""
+
+
+class MemorySearchConfig(_CamelModel):
+    max_results: int = 6
+    min_score: float = 0.25
+    vector_weight: float = 0.7
+    text_weight: float = 0.3
+    mmr_enabled: bool = True
+    mmr_lambda: float = 0.7
+    temporal_decay_enabled: bool = True
+    temporal_decay_half_life_days: int = 30
+
+
+class MemoryConfig(_CamelModel):
+    enabled: bool = True
+    consolidation_window: int = 50
+    consolidation_keep: int = 25
+    auto_flush_threshold: float = 0.65
+    search_backend: Literal["grep", "fts", "hybrid"] = "grep"
+    daily_logs: bool = True
+    max_memory_chars: int = 8000
+    embedding: EmbeddingConfig = Field(default_factory=EmbeddingConfig)
+    search: MemorySearchConfig = Field(default_factory=MemorySearchConfig)
+
+
 class EvolutionConfig(_CamelModel):
     memory_path: str = "./user-space/memory"
     skills_path: str = "./user-space/skills"
@@ -100,6 +130,7 @@ class AppConfig(_CamelModel):
     agent: AgentConfig = Field(default_factory=AgentConfig)
     providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
     channels: ChannelsConfig = Field(default_factory=ChannelsConfig)
+    memory: MemoryConfig = Field(default_factory=MemoryConfig)
     evolution: EvolutionConfig = Field(default_factory=EvolutionConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     storage: StorageConfig = Field(default_factory=StorageConfig)

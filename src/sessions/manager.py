@@ -282,6 +282,52 @@ async def remove_consolidated_messages(session_id: str, count: int) -> None:
     log.info("Consolidated messages removed", {"id": session_id, "removed": count})
 
 
+async def get_unconsolidated_count(session_id: str) -> int:
+    """Return the number of messages not yet consolidated."""
+    async with _connect() as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT messages, last_consolidated FROM sessions WHERE id = ?", (session_id,)
+        )
+        row = await cursor.fetchone()
+    if not row:
+        return 0
+    total = len(json.loads(row["messages"]))
+    return max(0, total - row["last_consolidated"])
+
+
+async def update_consolidation_pointer(session_id: str, new_pointer: int) -> None:
+    """Move the consolidation pointer forward."""
+    now = int(time.time() * 1000)
+    async with _connect() as db:
+        await db.execute(
+            "UPDATE sessions SET last_consolidated = ?, updated_at = ? WHERE id = ?",
+            (new_pointer, now, session_id),
+        )
+        await db.commit()
+    log.info("Consolidation pointer updated", {"id": session_id, "pointer": new_pointer})
+
+
+async def get_unconsolidated_messages(session_id: str) -> list[ChatMessage]:
+    """Return only messages after the consolidation pointer."""
+    async with _connect() as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT messages, last_consolidated FROM sessions WHERE id = ?", (session_id,)
+        )
+        row = await cursor.fetchone()
+    if not row:
+        return []
+    messages = [_dict_to_msg(m) for m in json.loads(row["messages"])]
+    pointer = row["last_consolidated"]
+    unconsolidated = messages[pointer:]
+    # Align to user message boundary to avoid orphaned tool results
+    for i, msg in enumerate(unconsolidated):
+        if msg.role == "user":
+            return unconsolidated[i:]
+    return unconsolidated
+
+
 async def list_sessions() -> list[Session]:
     async with _connect() as db:
         db.row_factory = aiosqlite.Row

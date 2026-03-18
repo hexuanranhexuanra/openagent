@@ -1,18 +1,25 @@
-"""Context builder — assembles AgentContext before each task, matching TS agent/context.ts."""
+"""Context builder — assembles AgentContext before each task.
+
+Redesigned to use the new memory system:
+- SOUL.md → identity section
+- MEMORY.md → always injected as "# Memory" section
+- Memory guide → instructs agent on memory tool usage
+- HISTORY.md / daily logs → NOT loaded (searchable via memory_search tool)
+"""
 
 from __future__ import annotations
 
 import os
 import platform
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from src.config import get_config
+from src.sessions.manager import append_message, get_or_create_session, get_unconsolidated_messages
 from src.tools.registry import get_all_tool_definitions
 from src.types import ChatMessage, ToolDefinition
-from src.config import get_config
 from src.utils.logger import create_logger
-from src.sessions.manager import append_message, get_or_create_session, get_session_messages
 
 if TYPE_CHECKING:
     from src.models.base import LLMProvider
@@ -34,7 +41,7 @@ class AgentContext:
     max_rounds: int
 
 
-def _truncate_bootstrap(content: str, max_chars: int) -> str:
+def _truncate(content: str, max_chars: int) -> str:
     if len(content) <= max_chars:
         return content
     head_len = int(max_chars * 0.7)
@@ -77,7 +84,7 @@ def _build_workspace_section() -> str:
         f"Working directory: {cwd}\n"
         "Config file: openagent.json (use read_config / write_config tools)\n"
         "User files: user-space/workspace/ (use read_file / write_file / list_files)\n"
-        "Memory files: user-space/memory/ (use memory_read / memory_update / memory_append)\n"
+        "Memory: MEMORY.md is loaded below; use memory_read/memory_save/memory_search tools\n"
         "Skills: user-space/skills/*.skill.py"
     )
 
@@ -87,7 +94,6 @@ def _build_runtime_section(channel: str, model_name: str) -> str:
 
     now = datetime.now(timezone.utc)
     try:
-        import zoneinfo
         local_tz = str(datetime.now().astimezone().tzinfo)
     except Exception:
         local_tz = "unknown"
@@ -121,12 +127,28 @@ def _build_skills_section() -> str | None:
     )
 
 
-def _build_memory_recall_section() -> str:
+def _build_memory_guide_section() -> str:
     return (
-        "## Memory Recall\n"
-        "Before answering about prior work, decisions, preferences, or facts:\n"
-        "use memory_read to check SOUL/USER/WORLD files.\n"
-        "If you checked but found nothing relevant, say so."
+        "## Memory Guide\n"
+        "Your long-term memory (MEMORY.md) is loaded below in the # Memory section.\n\n"
+        "Tools:\n"
+        "- **memory_save**: Update MEMORY.md. Read current content first, merge new info, write back complete file.\n"
+        "- **memory_search**: Search HISTORY.md and daily logs for past events not in MEMORY.md.\n"
+        "- **memory_read**: Read specific memory files for full context.\n\n"
+        "Background consolidation automatically summarizes old conversations into HISTORY.md.\n\n"
+        "**IMPORTANT: memory_save is for DURABLE FACTS, not conversation content.**\n\n"
+        "SAVE to memory:\n"
+        "- User-stated preferences or corrections (\"use dark mode\", \"don't mock the DB\")\n"
+        "- Project facts (tech stack, architecture, team)\n"
+        "- Explicit technical decisions with rationale\n"
+        "- Contacts, accounts, recurring workflows\n\n"
+        "DO NOT save:\n"
+        "- User's questions or requests (these are tasks, not facts)\n"
+        "- Debug sessions, error logs, troubleshooting steps\n"
+        "- One-time Q&A, code explanations\n"
+        "- Information already in MEMORY.md\n"
+        "- Anything that wouldn't help you in a FUTURE conversation with this user\n\n"
+        "Most conversations need zero memory_save calls. When in doubt, don't save."
     )
 
 
@@ -134,34 +156,13 @@ def _build_evolution_section() -> str:
     return (
         "## Evolution\n"
         "Use these tools proactively to improve over time:\n"
-        "- memory_update / memory_append: Record behaviors, preferences, facts\n"
+        "- memory_save: Record behaviors, preferences, facts to MEMORY.md\n"
+        "- memory_search: Search past conversation history\n"
         "- skill_create: Create reusable .skill.py for recurring tasks\n"
         "- skill_read: Read skill source before modifying\n"
         "- self_modify: Modify files in allowed paths (user-space/**, src/agent/tools/builtin/**)\n"
         "- sessions_spawn: Spawn a concurrent subagent (auto-notifies when done, do NOT poll)"
     )
-
-
-def _build_project_context_section(
-    files: list[dict], per_file_max: int, total_max: int
-) -> str | None:
-    non_empty = [f for f in files if f["content"].strip()]
-    if not non_empty:
-        return None
-
-    parts = ["# Project Context\n"]
-    total_chars = 0
-
-    for f in non_empty:
-        remaining = total_max - total_chars
-        if remaining <= 0:
-            break
-        budget = min(per_file_max, remaining)
-        truncated = _truncate_bootstrap(f["content"], budget)
-        parts.append(f"## {f['label']}\n{truncated}\n")
-        total_chars += len(truncated)
-
-    return "\n".join(parts)
 
 
 class ContextBuilder:
@@ -176,17 +177,16 @@ class ContextBuilder:
 
         depth = get_subagent_depth(peer_id) if channel == "subagent" else 0
 
-        # Consolidation before appending so MEMORY.md is fresh
-        # TODO: wire up consolidateIfNeeded once evolution module is done
-        # await consolidate_if_needed(session.id, self._provider, config.agent.context_window)
-
         await append_message(
             session.id,
             ChatMessage(role="user", content=user_message, timestamp=int(time.time() * 1000)),
         )
 
         system_prompt = await self._build_system_prompt(config, channel, depth)
-        messages = await get_session_messages(session.id)
+
+        # Use unconsolidated messages for the conversation context
+        messages = await get_unconsolidated_messages(session.id)
+
         tools = get_all_tool_definitions()
 
         return AgentContext(
@@ -215,33 +215,26 @@ class ContextBuilder:
                 skills = _build_skills_section()
                 if skills:
                     sections.append(skills)
-                sections.append(_build_memory_recall_section())
+                sections.append(_build_memory_guide_section())
                 sections.append(_build_evolution_section())
 
-            # Bootstrap memory files
+            # Inject memory files into system prompt
             from src.evolution.memory import get_memory_store
 
             memory = get_memory_store()
-            soul, user, world = await memory.read_all()
-            long_term = await memory.read_long_term()
+            bootstrap = await memory.get_bootstrap_context()
 
-            per_file_max = config.agent.bootstrap_max_chars
-            total_max = config.agent.bootstrap_total_max_chars
+            max_chars = config.memory.max_memory_chars
 
-            bootstrap_files: list[dict] = []
-            if soul:
-                bootstrap_files.append({"label": "SOUL.md", "content": soul})
-            if is_full:
-                if user:
-                    bootstrap_files.append({"label": "USER.md", "content": user})
-                if world:
-                    bootstrap_files.append({"label": "WORLD.md", "content": world})
-                if long_term:
-                    bootstrap_files.append({"label": "MEMORY.md", "content": long_term})
+            # SOUL.md → identity context (always)
+            if "SOUL.md" in bootstrap:
+                soul_content = _truncate(bootstrap["SOUL.md"], max_chars)
+                sections.append(f"# Agent Soul\n\n{soul_content}")
 
-            project_ctx = _build_project_context_section(bootstrap_files, per_file_max, total_max)
-            if project_ctx:
-                sections.append(project_ctx)
+            # MEMORY.md → always injected for main agent
+            if is_full and "MEMORY.md" in bootstrap:
+                memory_content = _truncate(bootstrap["MEMORY.md"], max_chars)
+                sections.append(f"# Memory\n\n{memory_content}")
 
             return "\n\n".join(sections)
 
