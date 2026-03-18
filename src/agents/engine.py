@@ -1,10 +1,15 @@
-"""AgentEngine — task lifecycle manager, matching TS agent/engine.ts."""
+"""AgentEngine — task lifecycle manager, matching TS agent/engine.ts.
+
+Supports two execution modes:
+1. StreamAgent mode (default) — ReAct loop with tool calls via LLM provider
+2. Claude Code mode — delegates to Claude Code CLI subprocess with its own tool loop
+"""
 
 from __future__ import annotations
 
 import asyncio
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, AsyncGenerator, Literal
 from secrets import token_hex
 
@@ -12,10 +17,10 @@ from src.agents.context import get_context_builder
 from src.agents.stream_agent import StreamAgent
 from src.types import AgentStreamEvent
 from src.utils.logger import create_logger
-from src.sessions.manager import get_session_messages
 
 if TYPE_CHECKING:
     from src.models.base import LLMProvider
+    from src.models.claude_code import ClaudeCodeProvider
 
 log = create_logger("agent:engine")
 
@@ -39,7 +44,9 @@ class _ActiveTask:
 
 
 class AgentEngine:
-    def __init__(self, provider: LLMProvider) -> None:
+    def __init__(self, provider: LLMProvider, use_claude_code: bool = False) -> None:
+        self._provider = provider
+        self._use_claude_code = use_claude_code
         self._stream_agent = StreamAgent(provider)
         self._tasks: dict[str, _ActiveTask] = {}
 
@@ -64,10 +71,18 @@ class AgentEngine:
         session_id: str | None = None
 
         try:
-            ctx = await get_context_builder().build(channel, peer_id, message)
-            session_id = ctx.session_id
-            async for event in self._stream_agent.run(ctx, cancel_event):
-                yield event
+            if self._use_claude_code:
+                async for event in self._run_claude_code(
+                    channel, peer_id, message, session_key, cancel_event
+                ):
+                    yield event
+                    if event.type == "done":
+                        session_id = session_key  # For consolidation
+            else:
+                ctx = await get_context_builder().build(channel, peer_id, message)
+                session_id = ctx.session_id
+                async for event in self._stream_agent.run(ctx, cancel_event):
+                    yield event
         except Exception as e:
             if not cancel_event.is_set():
                 info.status = "error"
@@ -77,7 +92,6 @@ class AgentEngine:
                 yield AgentStreamEvent(type="error", error=info.error)
             return
         finally:
-            # Retain task info for 60s for observability
             async def _cleanup():
                 await asyncio.sleep(60)
                 current = self._tasks.get(session_key)
@@ -95,20 +109,49 @@ class AgentEngine:
                 "durationMs": int((info.ended_at - info.started_at) * 1000),
             })
 
-            # Fire-and-forget reflection
-            if session_id:
-                async def _reflect():
+            # Fire-and-forget consolidation check (only for non-claude-code mode)
+            if session_id and not self._use_claude_code:
+                async def _post_task_consolidation():
                     try:
-                        from src.evolution.reflection import reflect_on_conversation
-
-                        msgs = await get_session_messages(session_id)
-                        await reflect_on_conversation(msgs, channel, peer_id)
+                        from src.evolution.consolidation import get_consolidation_manager
+                        mgr = get_consolidation_manager()
+                        if mgr:
+                            await mgr.maybe_consolidate(session_id)
                     except Exception as err:
-                        log.warn("Reflection failed (non-fatal)", {"taskId": task_id, "error": str(err)})
+                        log.warn("Post-task consolidation check failed", {
+                            "taskId": task_id, "error": str(err),
+                        })
 
-                asyncio.get_event_loop().create_task(_reflect())
+                asyncio.get_event_loop().create_task(_post_task_consolidation())
 
             yield AgentStreamEvent(type="done")
+
+    async def _run_claude_code(
+        self,
+        channel: str,
+        peer_id: str,
+        message: str,
+        session_key: str,
+        cancel_event: asyncio.Event,
+    ) -> AsyncGenerator[AgentStreamEvent, None]:
+        """Run via Claude Code provider — bypasses StreamAgent ReAct loop."""
+        from src.models.claude_code import ClaudeCodeProvider
+
+        provider: ClaudeCodeProvider = self._provider  # type: ignore
+
+        # Build system prompt from context builder (memory, identity, etc.)
+        from src.config import get_config
+        config = get_config()
+        ctx_builder = get_context_builder()
+        system_prompt = await ctx_builder._build_system_prompt(config, channel, depth=0)
+
+        async for event in provider.run_agent(
+            session_id=session_key,
+            user_message=message,
+            system_prompt=system_prompt,
+            cancel_event=cancel_event,
+        ):
+            yield event
 
     def cancel_task(self, channel: str, peer_id: str) -> bool:
         session_key = f"{channel}:{peer_id}"
@@ -150,7 +193,7 @@ def get_agent_engine() -> AgentEngine:
     return _engine
 
 
-def init_agent_engine(provider: LLMProvider) -> AgentEngine:
+def init_agent_engine(provider: LLMProvider, use_claude_code: bool = False) -> AgentEngine:
     global _engine
-    _engine = AgentEngine(provider)
+    _engine = AgentEngine(provider, use_claude_code=use_claude_code)
     return _engine

@@ -300,31 +300,43 @@ async def config_schema():
 
 @router.get("/memory/{file}", dependencies=[Depends(verify_bearer_token)])
 async def get_memory(file: str):
-    file_upper = file.upper()
-    if file_upper not in ("SOUL", "USER", "WORLD"):
-        raise HTTPException(400, "Invalid file. Must be SOUL, USER, or WORLD.")
     from src.evolution.memory import get_memory_store
-    content = await get_memory_store().read(file_upper)
-    return {"file": file_upper, "content": content}
+    content = await get_memory_store().read(file)
+    return {"file": file, "content": content}
 
 
 @router.put("/memory/{file}", dependencies=[Depends(verify_bearer_token)])
 async def put_memory(file: str, request: Request):
-    file_upper = file.upper()
-    if file_upper not in ("SOUL", "USER", "WORLD"):
-        raise HTTPException(400, "Invalid file.")
+    from src.evolution.memory import get_memory_store
     body = await request.json()
     content = body.get("content", "")
-    from src.evolution.memory import get_memory_store
-    await get_memory_store().write(file_upper, content)
-    return {"file": file_upper, "updated": True}
+    store = get_memory_store()
+    if file.upper() == "MEMORY":
+        await store.write_long_term(content)
+    else:
+        # Write to the specified file (SOUL, or legacy USER/WORLD)
+        path = store.base_path / f"{file.upper()}.md"
+        path.write_text(content, encoding="utf-8")
+    return {"file": file, "updated": True}
 
 
 @router.get("/memory", dependencies=[Depends(verify_bearer_token)])
 async def get_all_memory():
     from src.evolution.memory import get_memory_store
-    soul, user, world = await get_memory_store().read_all()
-    return {"soul": soul, "user": user, "world": world}
+    store = get_memory_store()
+    soul = await store.read_soul()
+    memory = await store.read_long_term()
+    return {"soul": soul, "memory": memory}
+
+
+@router.get("/memory/search", dependencies=[Depends(verify_bearer_token)])
+async def search_memory(q: str = "", max_results: int = 10):
+    from src.evolution.memory import get_memory_store
+    if not q.strip():
+        raise HTTPException(400, "Query parameter 'q' is required.")
+    store = get_memory_store()
+    results = await store.search_grep(q, max_results)
+    return {"query": q, "results": results, "count": len(results)}
 
 
 # ── Skills ──
